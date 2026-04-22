@@ -2,17 +2,17 @@ import express from 'express';
 import puppeteer from 'puppeteer';
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
 
 app.get('/', (req, res) => {
-  res.send('ok puppeteer');
+  res.send('ok cookies');
 });
 
 app.post('/resolve', async (req, res) => {
   let browser;
 
   try {
-    const { url } = req.body;
+    const { url, cookies = [] } = req.body;
 
     if (!url) {
       return res.status(400).json({ error: true, message: 'url is required' });
@@ -31,16 +31,22 @@ app.post('/resolve', async (req, res) => {
     });
 
     const page = await browser.newPage();
+
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36'
+    );
+
+    if (cookies.length) {
+      await page.setCookie(...cookies);
+    }
+
     await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await new Promise(r => setTimeout(r, 5000));
 
-    const finalUrl = page.url();
-    const title = await page.title();
-
     return res.json({
       ok: true,
-      finalUrl,
-      title
+      finalUrl: page.url(),
+      title: await page.title()
     });
   } catch (e) {
     return res.status(500).json({
@@ -48,9 +54,7 @@ app.post('/resolve', async (req, res) => {
       message: e.message
     });
   } finally {
-    if (browser) {
-      await browser.close().catch(() => {});
-    }
+    if (browser) await browser.close().catch(() => {});
   }
 });
 
