@@ -1,10 +1,21 @@
-import http from 'http';
+import express from 'express';
+
+const app = express();
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.send('ok express');
+});
+
+app.post('/resolve', (req, res) => {
+  res.json({
+    ok: true,
+    body: req.body
+  });
+});
 
 const PORT = process.env.PORT || 3000;
 
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('ok raw');
-}).listen(PORT, '0.0.0.0', () => {
-  console.log('raw server running on', PORT);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log('server running on', PORT);
 });
