@@ -67,7 +67,7 @@ app.post('/login', async (req, res) => {
     await page.type('input[name="password"]', password);
 
     await Promise.all([
-      page.click('button[data-test-selector="sign-in-submit"]'),
+      page.click('button[type="submit"], input[type="submit"]'),
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 })
     ]);
 
