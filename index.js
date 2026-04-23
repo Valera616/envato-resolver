@@ -75,36 +75,38 @@ async function login() {
       timeout: 60000,
     });
 
-    await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
-    console.log('[auth] Screenshot saved to /tmp/login-debug.png');
-
-// Закрываем cookie banner если есть
+    // Закрываем cookie banner если есть
     await new Promise(r => setTimeout(r, 2000));
     await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button')];
       const accept = btns.find(b => b.textContent.trim() === 'Accept Cookies');
       if (accept) accept.click();
-}).catch(() => {});
+    }).catch(() => {});
 
-await new Promise(r => setTimeout(r, 1000));
+    await new Promise(r => setTimeout(r, 1000));
 
-// Вводим логин и пароль
-await page.waitForSelector('input[name="username"]', { timeout: 30000 });
-await page.type('input[name="username"]', ENVATO_EMAIL, { delay: 40 });
-await page.type('input[name="password"]', ENVATO_PASSWORD, { delay: 40 });
+    // Кликаем на поле username и вводим
+    await page.waitForSelector('input[name="username"]', { timeout: 30000 });
+    await page.click('input[name="username"]');
+    await new Promise(r => setTimeout(r, 500));
+    await page.keyboard.type(ENVATO_EMAIL, { delay: 50 });
 
-await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
+    // Кликаем на поле password и вводим
+    await page.click('input[name="password"]');
+    await new Promise(r => setTimeout(r, 500));
+    await page.keyboard.type(ENVATO_PASSWORD, { delay: 50 });
 
-// Нажимаем Sign in
-await Promise.all([
-  page.click('button[type="submit"]'),
-  page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
-]);
+    await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
+
+    // Нажимаем Sign in
+    await Promise.all([
+      page.click('button[type="submit"]'),
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
+    ]);
 
     await new Promise(r => setTimeout(r, 3000));
 
-    // Envato показывает промежуточную страницу "Great to have you back!" с кнопкой Sign in
-    const confirmBtn = await page.$('button, a').catch(() => null);
+    // Envato показывает промежуточную страницу "Great to have you back!"
     const pageText = await page.evaluate(() => document.body.innerText);
     console.log('[auth] Intermediate page text:', pageText.substring(0, 100));
 
@@ -120,10 +122,6 @@ await Promise.all([
     }
 
     await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
-    console.log('[auth] Post-login URL:', page.url());
-
-
-    
     console.log('[auth] Post-login URL:', page.url());
 
     const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
