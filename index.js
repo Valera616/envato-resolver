@@ -11,7 +11,7 @@ let browser;
 // --- INIT BROWSER ---
 async function init() {
   browser = await puppeteer.launch({
-    headless: false,
+    headless: true,
     userDataDir: './user-data',
     defaultViewport: null,
     args: [
