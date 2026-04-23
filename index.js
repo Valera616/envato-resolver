@@ -6,6 +6,7 @@ import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createReadStream, existsSync } from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -87,6 +88,9 @@ async function login() {
     ]);
 
     await new Promise(r => setTimeout(r, 4000));
+
+    await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
+    console.log('[auth] Post-login URL:', page.url());
 
     const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
 
@@ -501,6 +505,20 @@ function cleanup(filePath) {
 
 // Health check
 app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
+
+app.get('/screenshot', (req, res) => {
+  const p = '/tmp/login-debug.png';
+  if (!existsSync(p)) return res.status(404).json({ error: 'No screenshot' });
+  res.setHeader('Content-Type', 'image/png');
+  createReadStream(p).pipe(res);
+});
+
+app.get('/screenshot2', (req, res) => {
+  const p = '/tmp/login-after.png';
+  if (!existsSync(p)) return res.status(404).json({ error: 'No screenshot' });
+  res.setHeader('Content-Type', 'image/png');
+  createReadStream(p).pipe(res);
+});
 
 // Ручной логин (для первичной авторизации или сброса)
 app.get('/login', async (req, res) => {
