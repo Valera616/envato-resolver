@@ -10,7 +10,7 @@ puppeteer.use(StealthPlugin());
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 const LOGIN_TOKEN = process.env.LOGIN_TOKEN;
 const ENVATO_EMAIL = process.env.ENVATO_EMAIL;
@@ -46,10 +46,20 @@ function areCookiesValid(cookies) {
   } catch { return false; }
 }
 
+// Парсим raw cookie string в массив объектов
+function parseCookieString(cookieStr, domain = '.envato.com') {
+  return cookieStr.split(';').map(pair => {
+    const [name, ...rest] = pair.trim().split('=');
+    return { name: name.trim(), value: rest.join('=').trim(), domain };
+  }).filter(c => c.name);
+}
+
 async function login() {
-  console.log('[auth] Logging in...');
+  console.log('[auth] Logging in via CDP insertText...');
   const b = await getBrowser();
   const page = await b.newPage();
+  const client = await page.createCDPSession();
+
   try {
     await page.goto('https://elements.envato.com/sign-in', { waitUntil: 'domcontentloaded', timeout: 60000 });
 
@@ -65,43 +75,30 @@ async function login() {
     await page.waitForSelector('input[name="username"]', { timeout: 30000 });
     await new Promise(r => setTimeout(r, 1000));
 
-    // Используем execCommand('insertText') — единственный метод который React слышит
-    // Username
-    await page.focus('input[name="username"]');
+    // Кликаем на username и вводим через CDP Input.insertText
+    await page.click('input[name="username"]');
     await new Promise(r => setTimeout(r, 500));
-    await page.evaluate((email) => {
-      const input = document.querySelector('input[name="username"]');
-      input.focus();
-      // execCommand insertText триггерит нативный input event который React обрабатывает
-      document.execCommand('insertText', false, email);
-    }, ENVATO_EMAIL);
+    await client.send('Input.insertText', { text: ENVATO_EMAIL });
     await new Promise(r => setTimeout(r, 500));
 
     const usernameVal = await page.$eval('input[name="username"]', el => el.value);
-    console.log('[auth] Username after insertText:', usernameVal);
+    console.log('[auth] Username after CDP insertText:', usernameVal);
 
-    // Password — то же самое
-    await page.focus('input[name="password"]');
+    // Password
+    await page.click('input[name="password"]');
     await new Promise(r => setTimeout(r, 300));
-    // Сначала очищаем (там может быть автозаполнение)
-    await page.evaluate(() => {
-      const input = document.querySelector('input[name="password"]');
-      input.focus();
-      document.execCommand('selectAll', false, null);
-      document.execCommand('delete', false, null);
-    });
-    await new Promise(r => setTimeout(r, 200));
-    await page.evaluate((password) => {
-      const input = document.querySelector('input[name="password"]');
-      input.focus();
-      document.execCommand('insertText', false, password);
-    }, ENVATO_PASSWORD);
+    // Очищаем существующее значение
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyA');
+    await page.keyboard.up('Control');
+    await new Promise(r => setTimeout(r, 100));
+    await client.send('Input.insertText', { text: ENVATO_PASSWORD });
+    await new Promise(r => setTimeout(r, 500));
 
     const passwordLen = await page.$eval('input[name="password"]', el => el.value.length);
-    console.log('[auth] Password length after insertText:', passwordLen);
+    console.log('[auth] Password length:', passwordLen);
 
     await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
-    console.log('[auth] Screenshot saved, submitting...');
 
     // Сабмит
     await Promise.all([
@@ -111,22 +108,16 @@ async function login() {
     await new Promise(r => setTimeout(r, 4000));
 
     const finalUrl = page.url();
-    console.log('[auth] Final URL after submit:', finalUrl);
-
+    console.log('[auth] URL after submit:', finalUrl);
     await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
 
-    // Если всё ещё на sign-in — логин не удался
     if (finalUrl.includes('sign-in')) {
-      const pageText = await page.evaluate(() => document.body.innerText);
-      throw new Error('Still on sign-in page after submit. Page text: ' + pageText.substring(0, 200));
+      throw new Error('Still on sign-in page. Username likely not filled. Use /set-cookie-string instead.');
     }
 
-    // Промежуточная страница "Great to have you back!" — URL изменился но нужно кликнуть Sign in
     const pageText = await page.evaluate(() => document.body.innerText);
-    console.log('[auth] Page text after submit:', pageText.substring(0, 100));
-
     if (pageText.includes('Great to have you back')) {
-      console.log('[auth] Intermediate page detected, clicking Sign in...');
+      console.log('[auth] Intermediate page, clicking Sign in...');
       await page.evaluate(() => {
         const btns = [...document.querySelectorAll('button, a')];
         const signIn = btns.find(b => b.textContent.trim() === 'Sign in');
@@ -134,12 +125,11 @@ async function login() {
       });
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 3000));
-      await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
     }
 
     console.log('[auth] Final URL:', page.url());
     const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
-    if (!areCookiesValid(cookies)) throw new Error('envatoid cookie is missing or invalid after login');
+    if (!areCookiesValid(cookies)) throw new Error('envatoid cookie missing after login');
 
     savedCookies = cookies;
     console.log(`[auth] Login OK, ${cookies.length} cookies`);
@@ -254,7 +244,8 @@ async function convertToMp4IfNeeded(filePath, sizeMB) {
   if (sizeMB <= 1024) { return { filePath, converted: false }; }
   const outPath = filePath.replace(/\.[^.]+$/, '_compressed.mp4');
   await new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', ['-i', filePath, '-c:v', 'libx264', '-crf', '23', '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', outPath]);
+    const proc = spawn('ffmpeg', ['-i', filePath, '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
+      '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', outPath]);
     proc.stderr.on('data', d => process.stdout.write(d));
     proc.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
   });
@@ -266,6 +257,8 @@ async function convertToMp4IfNeeded(filePath, sizeMB) {
 function cleanup(filePath) {
   try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 }
+
+// ═══════════ ROUTES ═══════════
 
 app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
 
@@ -300,13 +293,20 @@ app.get('/status', (req, res) => {
   res.json({ ok: true, sessionValid: valid, expiresAt, cookiesCount: savedCookies?.length || 0 });
 });
 
-// Принять куки напрямую (обход логина)
-app.post('/set-cookies', async (req, res) => {
+// ─────────────────────────────────────────
+// ПРИНЯТЬ КУКИ КАК RAW СТРОКУ (из браузера)
+// POST /set-cookie-string?token=xxx
+// Body: { "cookieString": "_ga=...; envatoid=eyJ..." }
+// ─────────────────────────────────────────
+app.post('/set-cookie-string', async (req, res) => {
   if (req.query.token !== LOGIN_TOKEN) return res.status(403).json({ ok: false, error: 'Forbidden' });
-  const { cookies } = req.body;
-  if (!cookies || !Array.isArray(cookies)) return res.status(400).json({ ok: false, error: 'cookies array required' });
+  const { cookieString } = req.body;
+  if (!cookieString) return res.status(400).json({ ok: false, error: 'cookieString required' });
+
+  const cookies = parseCookieString(cookieString);
   savedCookies = cookies;
   const valid = areCookiesValid(cookies);
+  console.log(`[set-cookie-string] ${cookies.length} cookies set, valid: ${valid}`);
   res.json({ ok: true, sessionValid: valid, cookiesCount: cookies.length });
 });
 
