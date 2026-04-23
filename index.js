@@ -62,37 +62,43 @@ async function login() {
     }).catch(() => {});
     await new Promise(r => setTimeout(r, 1000));
 
-    // Ждём форму
     await page.waitForSelector('input[name="username"]', { timeout: 30000 });
     await new Promise(r => setTimeout(r, 1000));
 
-    // Логируем все инпуты для дебага
-    const inputsInfo = await page.evaluate(() =>
-      [...document.querySelectorAll('input')].map(el => ({
-        name: el.name, type: el.type, id: el.id,
-        value: el.value, disabled: el.disabled, readOnly: el.readOnly
-      }))
-    );
-    console.log('[auth] Inputs found:', JSON.stringify(inputsInfo));
+    // Используем execCommand('insertText') — единственный метод который React слышит
+    // Username
+    await page.focus('input[name="username"]');
+    await new Promise(r => setTimeout(r, 500));
+    await page.evaluate((email) => {
+      const input = document.querySelector('input[name="username"]');
+      input.focus();
+      // execCommand insertText триггерит нативный input event который React обрабатывает
+      document.execCommand('insertText', false, email);
+    }, ENVATO_EMAIL);
+    await new Promise(r => setTimeout(r, 500));
 
-    // elementHandle подход с тройным кликом
-    const usernameHandle = await page.$('input[name="username"]');
-    await usernameHandle.click({ clickCount: 3 });
-    await new Promise(r => setTimeout(r, 300));
-    await usernameHandle.type(ENVATO_EMAIL, { delay: 100 });
-
-    // Проверяем значение
     const usernameVal = await page.$eval('input[name="username"]', el => el.value);
-    console.log('[auth] Username value after type:', usernameVal);
+    console.log('[auth] Username after insertText:', usernameVal);
 
-    // Пароль
-    const passwordHandle = await page.$('input[name="password"]');
-    await passwordHandle.click({ clickCount: 3 });
+    // Password — то же самое
+    await page.focus('input[name="password"]');
     await new Promise(r => setTimeout(r, 300));
-    await passwordHandle.type(ENVATO_PASSWORD, { delay: 100 });
+    // Сначала очищаем (там может быть автозаполнение)
+    await page.evaluate(() => {
+      const input = document.querySelector('input[name="password"]');
+      input.focus();
+      document.execCommand('selectAll', false, null);
+      document.execCommand('delete', false, null);
+    });
+    await new Promise(r => setTimeout(r, 200));
+    await page.evaluate((password) => {
+      const input = document.querySelector('input[name="password"]');
+      input.focus();
+      document.execCommand('insertText', false, password);
+    }, ENVATO_PASSWORD);
 
     const passwordLen = await page.$eval('input[name="password"]', el => el.value.length);
-    console.log('[auth] Password length after type:', passwordLen);
+    console.log('[auth] Password length after insertText:', passwordLen);
 
     await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
     console.log('[auth] Screenshot saved, submitting...');
@@ -102,14 +108,25 @@ async function login() {
       page.click('button[type="submit"]'),
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
     ]);
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 4000));
 
+    const finalUrl = page.url();
+    console.log('[auth] Final URL after submit:', finalUrl);
+
+    await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
+
+    // Если всё ещё на sign-in — логин не удался
+    if (finalUrl.includes('sign-in')) {
+      const pageText = await page.evaluate(() => document.body.innerText);
+      throw new Error('Still on sign-in page after submit. Page text: ' + pageText.substring(0, 200));
+    }
+
+    // Промежуточная страница "Great to have you back!" — URL изменился но нужно кликнуть Sign in
     const pageText = await page.evaluate(() => document.body.innerText);
-    console.log('[auth] After submit:', pageText.substring(0, 200));
+    console.log('[auth] Page text after submit:', pageText.substring(0, 100));
 
-    // Промежуточная страница
-    if (pageText.includes('Great to have you back') || pageText.includes('Sign in')) {
-      console.log('[auth] Intermediate page, clicking Sign in...');
+    if (pageText.includes('Great to have you back')) {
+      console.log('[auth] Intermediate page detected, clicking Sign in...');
       await page.evaluate(() => {
         const btns = [...document.querySelectorAll('button, a')];
         const signIn = btns.find(b => b.textContent.trim() === 'Sign in');
@@ -117,13 +134,12 @@ async function login() {
       });
       await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await new Promise(r => setTimeout(r, 3000));
+      await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
     }
 
-    await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
     console.log('[auth] Final URL:', page.url());
-
     const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
-    if (!areCookiesValid(cookies)) throw new Error('Login succeeded but envatoid cookie is missing or invalid');
+    if (!areCookiesValid(cookies)) throw new Error('envatoid cookie is missing or invalid after login');
 
     savedCookies = cookies;
     console.log(`[auth] Login OK, ${cookies.length} cookies`);
@@ -282,6 +298,16 @@ app.get('/status', (req, res) => {
     } catch {}
   }
   res.json({ ok: true, sessionValid: valid, expiresAt, cookiesCount: savedCookies?.length || 0 });
+});
+
+// Принять куки напрямую (обход логина)
+app.post('/set-cookies', async (req, res) => {
+  if (req.query.token !== LOGIN_TOKEN) return res.status(403).json({ ok: false, error: 'Forbidden' });
+  const { cookies } = req.body;
+  if (!cookies || !Array.isArray(cookies)) return res.status(400).json({ ok: false, error: 'cookies array required' });
+  savedCookies = cookies;
+  const valid = areCookiesValid(cookies);
+  res.json({ ok: true, sessionValid: valid, cookiesCount: cookies.length });
 });
 
 app.post('/download', async (req, res) => {
