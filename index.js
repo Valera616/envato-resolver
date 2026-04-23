@@ -127,7 +127,7 @@ app.post('/login', async (req, res) => {
       }).catch(() => null)
     ]);
 
-    await page.waitForTimeout(7000);
+    await new Promise(resolve => setTimeout(resolve, 7000));
 
     console.log('AFTER LOGIN URL:', page.url());
     console.log('AFTER LOGIN TITLE:', await page.title());
@@ -211,7 +211,7 @@ app.post('/resolve', async (req, res) => {
       timeout: 60000
     });
 
-    await page.waitForTimeout(5000);
+    await new Promise(resolve => setTimeout(resolve, 5000));
 
     console.log('RESOLVE URL:', page.url());
     console.log('RESOLVE TITLE:', await page.title());
