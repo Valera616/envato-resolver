@@ -1,5 +1,7 @@
 import express from 'express';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-extra';
+import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+puppeteer.use(StealthPlugin());
 import { execSync, spawn } from 'child_process';
 import fs from 'fs';
 import path from 'path';
@@ -71,6 +73,9 @@ async function login() {
       waitUntil: 'domcontentloaded',
       timeout: 60000,
     });
+
+    await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
+    console.log('[auth] Screenshot saved to /tmp/login-debug.png');
 
     await page.waitForSelector('input[name="username"]', { timeout: 30000 });
     await page.type('input[name="username"]', ENVATO_EMAIL, { delay: 40 });
