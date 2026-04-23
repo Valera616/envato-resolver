@@ -87,9 +87,29 @@ async function login() {
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
     ]);
 
-    await new Promise(r => setTimeout(r, 4000));
+    await new Promise(r => setTimeout(r, 3000));
+
+    // Envato показывает промежуточную страницу "Great to have you back!" с кнопкой Sign in
+    const confirmBtn = await page.$('button, a').catch(() => null);
+    const pageText = await page.evaluate(() => document.body.innerText);
+    console.log('[auth] Intermediate page text:', pageText.substring(0, 100));
+
+    if (pageText.includes('Great to have you back') || pageText.includes('Sign in')) {
+      console.log('[auth] Found intermediate page, clicking Sign in...');
+      await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, a')];
+        const signIn = btns.find(b => b.textContent.trim() === 'Sign in');
+        if (signIn) signIn.click();
+      });
+      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await new Promise(r => setTimeout(r, 3000));
+    }
 
     await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
+    console.log('[auth] Post-login URL:', page.url());
+
+
+    
     console.log('[auth] Post-login URL:', page.url());
 
     const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
