@@ -72,7 +72,7 @@ app.post('/login', async (req, res) => {
     }
 
     browser = await puppeteer.launch({
-      headless: false,
+      headless: true,
       defaultViewport: null,
       args: [
         '--no-sandbox',
