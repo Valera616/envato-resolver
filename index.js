@@ -43,12 +43,33 @@ app.get('/login', async (req, res) => {
 
   try {
     await page.goto('https://elements.envato.com/sign-in', {
-      waitUntil: 'domcontentloaded'
+      waitUntil: 'domcontentloaded',
+      timeout: 60000
     });
 
-    res.send('Login page opened. Complete login manually.');
+    await page.waitForSelector('input[name="username"]', { timeout: 60000 });
+    await page.waitForSelector('input[name="password"]', { timeout: 60000 });
+
+    await page.type('input[name="username"]', process.env.ENVATO_EMAIL, { delay: 30 });
+    await page.type('input[name="password"]', process.env.ENVATO_PASSWORD, { delay: 30 });
+
+    await Promise.all([
+      page.click('button[type="submit"], input[type="submit"]'),
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => null)
+    ]);
+
+    await new Promise(r => setTimeout(r, 5000));
+
+    res.json({
+      ok: true,
+      finalUrl: page.url(),
+      title: await page.title()
+    });
   } catch (error) {
-    res.status(500).send(error.message);
+    res.status(500).json({
+      ok: false,
+      error: error.message
+    });
   }
 });
 
