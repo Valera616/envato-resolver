@@ -78,14 +78,28 @@ async function login() {
     await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
     console.log('[auth] Screenshot saved to /tmp/login-debug.png');
 
-    await page.waitForSelector('input[name="username"]', { timeout: 30000 });
-    await page.type('input[name="username"]', ENVATO_EMAIL, { delay: 40 });
-    await page.type('input[name="password"]', ENVATO_PASSWORD, { delay: 40 });
+// Закрываем cookie banner если есть
+    await new Promise(r => setTimeout(r, 2000));
+    await page.evaluate(() => {
+      const btns = [...document.querySelectorAll('button')];
+      const accept = btns.find(b => b.textContent.trim() === 'Accept Cookies');
+      if (accept) accept.click();
+}).catch(() => {});
 
-    await Promise.all([
-      page.click('button[type="submit"]'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
-    ]);
+await new Promise(r => setTimeout(r, 1000));
+
+// Вводим логин и пароль
+await page.waitForSelector('input[name="username"]', { timeout: 30000 });
+await page.type('input[name="username"]', ENVATO_EMAIL, { delay: 40 });
+await page.type('input[name="password"]', ENVATO_PASSWORD, { delay: 40 });
+
+await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
+
+// Нажимаем Sign in
+await Promise.all([
+  page.click('button[type="submit"]'),
+  page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
+]);
 
     await new Promise(r => setTimeout(r, 3000));
 
