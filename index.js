@@ -26,12 +26,7 @@ async function getBrowser() {
   if (!browser || !browser.connected) {
     browser = await puppeteer.launch({
       headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
     });
     console.log('[browser] Started');
   }
@@ -43,68 +38,66 @@ function areCookiesValid(cookies) {
   const envatoid = cookies.find(c => c.name === 'envatoid');
   if (!envatoid) return false;
   try {
-    const payload = JSON.parse(
-      Buffer.from(envatoid.value.split('.')[1], 'base64').toString()
-    );
+    const payload = JSON.parse(Buffer.from(envatoid.value.split('.')[1], 'base64').toString());
     const expiresAt = payload.exp * 1000;
     const isValid = Date.now() < expiresAt - 60_000;
-    console.log(`[auth] envatoid expires at ${new Date(expiresAt).toISOString()}, valid: ${isValid}`);
+    console.log(`[auth] envatoid valid: ${isValid}, expires: ${new Date(expiresAt).toISOString()}`);
     return isValid;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 async function login() {
   console.log('[auth] Logging in...');
   const b = await getBrowser();
   const page = await b.newPage();
-
   try {
-    await page.goto('https://elements.envato.com/sign-in', {
-      waitUntil: 'domcontentloaded',
-      timeout: 60000,
-    });
+    await page.goto('https://elements.envato.com/sign-in', { waitUntil: 'domcontentloaded', timeout: 60000 });
 
+    // Закрываем cookie banner
     await new Promise(r => setTimeout(r, 2000));
     await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button')];
       const accept = btns.find(b => b.textContent.trim() === 'Accept Cookies');
       if (accept) accept.click();
     }).catch(() => {});
-
     await new Promise(r => setTimeout(r, 1000));
 
+    // Ждём поле username
     await page.waitForSelector('input[name="username"]', { timeout: 30000 });
+    await new Promise(r => setTimeout(r, 500));
 
-    await page.evaluate((email, password) => {
-      const setReactValue = (el, val) => {
-        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
-        nativeSetter.set.call(el, val);
-        el.dispatchEvent(new Event('input', { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-      };
-      const usernameEl = document.querySelector('input[name="username"]');
-      const passwordEl = document.querySelector('input[name="password"]');
-      if (usernameEl) setReactValue(usernameEl, email);
-      if (passwordEl) setReactValue(passwordEl, password);
-    }, ENVATO_EMAIL, ENVATO_PASSWORD);
+    // Используем нативную клавиатуру Puppeteer — работает с любым React
+    await page.focus('input[name="username"]');
+    await new Promise(r => setTimeout(r, 300));
+    await page.keyboard.type(ENVATO_EMAIL, { delay: 80 });
+
+    // Переходим на поле пароля
+    await page.focus('input[name="password"]');
+    await new Promise(r => setTimeout(r, 300));
+    // Очищаем поле на случай если там что-то есть
+    await page.keyboard.down('Control');
+    await page.keyboard.press('KeyA');
+    await page.keyboard.up('Control');
+    await new Promise(r => setTimeout(r, 100));
+    await page.keyboard.type(ENVATO_PASSWORD, { delay: 80 });
 
     await new Promise(r => setTimeout(r, 500));
     await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
+    console.log('[auth] Credentials typed, submitting...');
 
+    // Сабмит
     await Promise.all([
       page.click('button[type="submit"]'),
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
     ]);
-
     await new Promise(r => setTimeout(r, 3000));
 
+    // Промежуточная страница "Great to have you back!"
     const pageText = await page.evaluate(() => document.body.innerText);
-    console.log('[auth] Page after submit:', pageText.substring(0, 150));
+    console.log('[auth] After submit page text:', pageText.substring(0, 150));
 
     if (pageText.includes('Great to have you back') || pageText.includes('Sign in')) {
-      console.log('[auth] Found intermediate page, clicking Sign in...');
+      console.log('[auth] Intermediate page, clicking Sign in...');
       await page.evaluate(() => {
         const btns = [...document.querySelectorAll('button, a')];
         const signIn = btns.find(b => b.textContent.trim() === 'Sign in');
@@ -118,13 +111,10 @@ async function login() {
     console.log('[auth] Post-login URL:', page.url());
 
     const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
-
-    if (!areCookiesValid(cookies)) {
-      throw new Error('Login succeeded but envatoid cookie is missing or invalid');
-    }
+    if (!areCookiesValid(cookies)) throw new Error('Login succeeded but envatoid cookie is missing or invalid');
 
     savedCookies = cookies;
-    console.log(`[auth] Login OK, got ${cookies.length} cookies`);
+    console.log(`[auth] Login OK, ${cookies.length} cookies saved`);
     return cookies;
   } finally {
     await page.close();
@@ -142,16 +132,10 @@ function selectBestAsset(assets) {
     const label = (a.label || a.resolution || '').toLowerCase();
     return !label.includes('4k') && !label.includes('3840') && !label.includes('uhd');
   });
-  if (non4k.length === 0) {
-    console.log('[quality] Only 4K available, using it');
-    return assets[0];
-  }
+  if (non4k.length === 0) { console.log('[quality] Only 4K, using it'); return assets[0]; }
   for (const p of priority) {
     const match = non4k.find(a => (a.label || a.resolution || '').toLowerCase().includes(p));
-    if (match) {
-      console.log(`[quality] Selected: ${match.label || match.resolution}`);
-      return match;
-    }
+    if (match) { console.log(`[quality] Selected: ${match.label || match.resolution}`); return match; }
   }
   return non4k[0];
 }
@@ -160,56 +144,42 @@ async function downloadEnvatoFile(itemUrl, cookies) {
   const b = await getBrowser();
   const page = await b.newPage();
   let downloadUrl = null;
-
   try {
     await page.setCookie(...cookies);
-
     const downloadDataResponses = [];
     page.on('response', async (response) => {
       if (response.url().includes('download.data')) {
-        try {
-          const text = await response.text();
-          downloadDataResponses.push(text);
-          console.log('[intercept] Caught download.data response');
-        } catch {}
+        try { downloadDataResponses.push(await response.text()); console.log('[intercept] download.data caught'); } catch {}
       }
     });
 
     await page.goto(itemUrl, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
 
-    const pageData = await page.evaluate(() => {
-      try { return JSON.stringify(window.__remixContext); } catch { return null; }
-    });
-
-    let itemUuid = null;
-    let assets = [];
+    const pageData = await page.evaluate(() => { try { return JSON.stringify(window.__remixContext); } catch { return null; } });
+    let itemUuid = null, assets = [];
 
     if (pageData) {
       const parsed = JSON.parse(pageData);
-      const findAssets = (obj, depth = 0) => {
-        if (!obj || depth > 10) return;
+      const find = (obj, d = 0) => {
+        if (!obj || d > 10) return;
         if (typeof obj === 'object') {
           if (obj.itemUuid) itemUuid = obj.itemUuid;
           if (obj.assets && Array.isArray(obj.assets)) assets = obj.assets;
           if (obj.videoAssets && Array.isArray(obj.videoAssets)) assets = obj.videoAssets;
-          Object.values(obj).forEach(v => findAssets(v, depth + 1));
+          Object.values(obj).forEach(v => find(v, d + 1));
         }
       };
-      findAssets(parsed);
+      find(parsed);
     }
 
-    if (!itemUuid) {
-      const match = page.url().match(/([0-9a-f-]{36})/);
-      if (match) itemUuid = match[1];
-    }
-
+    if (!itemUuid) { const m = page.url().match(/([0-9a-f-]{36})/); if (m) itemUuid = m[1]; }
     console.log('[parse] itemUuid:', itemUuid, '| assets:', assets.length);
 
     const findUrl = (arr) => {
       if (!Array.isArray(arr)) return null;
       for (let i = 0; i < arr.length; i++) {
-        if (arr[i] === 'downloadUrl' && typeof arr[i + 1] === 'string') return arr[i + 1];
+        if (arr[i] === 'downloadUrl' && typeof arr[i+1] === 'string') return arr[i+1];
         if (Array.isArray(arr[i])) { const f = findUrl(arr[i]); if (f) return f; }
         if (arr[i] && typeof arr[i] === 'object') { const f = findUrl(Object.values(arr[i])); if (f) return f; }
       }
@@ -226,73 +196,51 @@ async function downloadEnvatoFile(itemUrl, cookies) {
         const chosen = selectBestAsset(assets);
         selectedAssetUuid = chosen.assetUuid || chosen.uuid || chosen.id;
       }
-
       const itemType = itemUrl.includes('stock-video') ? 'stock-video' :
                        itemUrl.includes('music') ? 'music' :
                        itemUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
-
       let apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
       if (selectedAssetUuid) apiUrl += `&assetUuid=${selectedAssetUuid}`;
 
-      console.log('[download] Requesting:', apiUrl);
+      console.log('[download] API URL:', apiUrl);
       const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
       const resp = await fetch(apiUrl, {
         headers: {
-          'accept': '*/*',
-          'cookie': cookieStr,
-          'referer': itemUrl,
+          'accept': '*/*', 'cookie': cookieStr, 'referer': itemUrl,
           'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'sec-fetch-dest': 'empty',
-          'sec-fetch-mode': 'cors',
-          'sec-fetch-site': 'same-origin',
+          'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin',
         },
       });
-
       const text = await resp.text();
-      console.log('[download.data] Response:', text.substring(0, 200));
-      try { downloadUrl = findUrl(JSON.parse(text)); } catch (e) {
-        console.error('[download.data] Parse error:', e.message);
-      }
+      console.log('[download.data]', text.substring(0, 200));
+      try { downloadUrl = findUrl(JSON.parse(text)); } catch (e) { console.error('[download.data] parse error:', e.message); }
     }
 
     if (!downloadUrl) throw new Error('Could not obtain download URL');
-
-    console.log('[download] Got URL:', downloadUrl.substring(0, 80) + '...');
+    console.log('[download] URL:', downloadUrl.substring(0, 80) + '...');
 
     const urlObj = new URL(downloadUrl);
-    const rawFilename = urlObj.pathname.split('/').pop() || `envato-${Date.now()}.mov`;
-    const filename = decodeURIComponent(rawFilename);
+    const filename = decodeURIComponent(urlObj.pathname.split('/').pop() || `envato-${Date.now()}.mov`);
     const filePath = path.join(DOWNLOAD_DIR, filename);
 
-    console.log('[download] Downloading to:', filePath);
     const fileResp = await fetch(downloadUrl);
     if (!fileResp.ok) throw new Error(`Download failed: ${fileResp.status}`);
-
-    const buffer = Buffer.from(await fileResp.arrayBuffer());
-    fs.writeFileSync(filePath, buffer);
+    fs.writeFileSync(filePath, Buffer.from(await fileResp.arrayBuffer()));
 
     const sizeMB = fs.statSync(filePath).size / 1024 / 1024;
     console.log(`[download] Done: ${sizeMB.toFixed(1)} MB`);
     return { filePath, filename, sizeMB };
-
   } finally {
     await page.close();
   }
 }
 
 async function convertToMp4IfNeeded(filePath, sizeMB) {
-  if (sizeMB <= 1024) {
-    console.log('[ffmpeg] File is under 1GB, skipping');
-    return { filePath, converted: false };
-  }
+  if (sizeMB <= 1024) { console.log('[ffmpeg] Under 1GB, skipping'); return { filePath, converted: false }; }
   console.log(`[ffmpeg] ${sizeMB.toFixed(0)}MB > 1GB, converting...`);
   const outPath = filePath.replace(/\.[^.]+$/, '_compressed.mp4');
   await new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', [
-      '-i', filePath, '-c:v', 'libx264', '-crf', '23',
-      '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k',
-      '-movflags', '+faststart', '-y', outPath,
-    ]);
+    const proc = spawn('ffmpeg', ['-i', filePath, '-c:v', 'libx264', '-crf', '23', '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', outPath]);
     proc.stderr.on('data', d => process.stdout.write(d));
     proc.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
   });
@@ -305,20 +253,20 @@ function cleanup(filePath) {
   try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 }
 
+// ═══════════ ROUTES ═══════════
+
 app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
 
 app.get('/screenshot', (req, res) => {
-  const p = '/tmp/login-debug.png';
-  if (!existsSync(p)) return res.status(404).json({ error: 'No screenshot' });
+  if (!existsSync('/tmp/login-debug.png')) return res.status(404).json({ error: 'No screenshot' });
   res.setHeader('Content-Type', 'image/png');
-  createReadStream(p).pipe(res);
+  createReadStream('/tmp/login-debug.png').pipe(res);
 });
 
 app.get('/screenshot2', (req, res) => {
-  const p = '/tmp/login-after.png';
-  if (!existsSync(p)) return res.status(404).json({ error: 'No screenshot' });
+  if (!existsSync('/tmp/login-after.png')) return res.status(404).json({ error: 'No screenshot' });
   res.setHeader('Content-Type', 'image/png');
-  createReadStream(p).pipe(res);
+  createReadStream('/tmp/login-after.png').pipe(res);
 });
 
 app.get('/login', async (req, res) => {
@@ -337,8 +285,8 @@ app.get('/status', (req, res) => {
   let expiresAt = null;
   if (envatoid) {
     try {
-      const payload = JSON.parse(Buffer.from(envatoid.value.split('.')[1], 'base64').toString());
-      expiresAt = new Date(payload.exp * 1000).toISOString();
+      const p = JSON.parse(Buffer.from(envatoid.value.split('.')[1], 'base64').toString());
+      expiresAt = new Date(p.exp * 1000).toISOString();
     } catch {}
   }
   res.json({ ok: true, sessionValid: valid, expiresAt, cookiesCount: savedCookies?.length || 0 });
@@ -347,14 +295,9 @@ app.get('/status', (req, res) => {
 app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ ok: false, error: 'url is required' });
-
-  let itemUrl = url.includes('elements.envato.com')
-    ? url.replace('elements.envato.com', 'app.envato.com')
-    : url;
-
-  console.log('[/download] Request for:', itemUrl);
+  let itemUrl = url.includes('elements.envato.com') ? url.replace('elements.envato.com', 'app.envato.com') : url;
+  console.log('[/download]', itemUrl);
   let filePath = null;
-
   try {
     let cookies = await getCookies();
     let result;
@@ -366,25 +309,20 @@ app.post('/download', async (req, res) => {
         result = await downloadEnvatoFile(itemUrl, cookies);
       } else throw e;
     }
-
     filePath = result.filePath;
     const converted = await convertToMp4IfNeeded(result.filePath, result.sizeMB);
     filePath = converted.filePath;
-
     const finalSize = fs.statSync(filePath).size;
     const filename = path.basename(filePath);
-
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Length', finalSize);
     res.setHeader('X-Converted', converted.converted ? 'true' : 'false');
     res.setHeader('X-File-Size-MB', (finalSize / 1024 / 1024).toFixed(1));
-
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     stream.on('end', () => cleanup(filePath));
     stream.on('error', () => cleanup(filePath));
-
   } catch (e) {
     console.error('[/download] Error:', e.message);
     if (filePath) cleanup(filePath);
@@ -396,10 +334,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`[server] Running on port ${PORT}`);
   await getBrowser();
-  try {
-    await getCookies();
-    console.log('[server] Auto-login on startup: OK');
-  } catch (e) {
-    console.error('[server] Auto-login failed:', e.message);
-  }
+  try { await getCookies(); console.log('[server] Auto-login OK'); }
+  catch (e) { console.error('[server] Auto-login failed:', e.message); }
 });
