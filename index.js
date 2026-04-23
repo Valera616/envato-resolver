@@ -11,14 +11,15 @@ let browser;
 // --- INIT BROWSER ---
 async function init() {
   browser = await puppeteer.launch({
-    headless: true,
+    headless: false,
     userDataDir: './user-data',
     defaultViewport: null,
     args: [
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-dev-shm-usage',
-      '--disable-gpu'
+      '--disable-gpu',
+      '--remote-debugging-port=9222'
     ]
   });
 
