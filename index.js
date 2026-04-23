@@ -1,10 +1,6 @@
 import express from 'express';
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
-puppeteer.use(StealthPlugin());
-import { execSync, spawn } from 'child_process';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { spawn } from 'child_process';
 import fs, { createReadStream, existsSync } from 'fs';
 import path from 'path';
@@ -70,7 +66,6 @@ async function login() {
       timeout: 60000,
     });
 
-    // Закрываем cookie banner если есть
     await new Promise(r => setTimeout(r, 2000));
     await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button')];
@@ -80,10 +75,8 @@ async function login() {
 
     await new Promise(r => setTimeout(r, 1000));
 
-    // Ждём поле username
     await page.waitForSelector('input[name="username"]', { timeout: 30000 });
 
-    // Вводим через React-совместимый способ (nativeInputValueSetter)
     await page.evaluate((email, password) => {
       const setReactValue = (el, val) => {
         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
@@ -100,7 +93,6 @@ async function login() {
     await new Promise(r => setTimeout(r, 500));
     await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
 
-    // Нажимаем Sign in
     await Promise.all([
       page.click('button[type="submit"]'),
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
@@ -108,7 +100,6 @@ async function login() {
 
     await new Promise(r => setTimeout(r, 3000));
 
-    // Промежуточная страница "Great to have you back!"
     const pageText = await page.evaluate(() => document.body.innerText);
     console.log('[auth] Page after submit:', pageText.substring(0, 150));
 
@@ -141,9 +132,7 @@ async function login() {
 }
 
 async function getCookies(forceRelogin = false) {
-  if (!forceRelogin && areCookiesValid(savedCookies)) {
-    return savedCookies;
-  }
+  if (!forceRelogin && areCookiesValid(savedCookies)) return savedCookies;
   return await login();
 }
 
@@ -158,10 +147,7 @@ function selectBestAsset(assets) {
     return assets[0];
   }
   for (const p of priority) {
-    const match = non4k.find(a => {
-      const label = (a.label || a.resolution || '').toLowerCase();
-      return label.includes(p);
-    });
+    const match = non4k.find(a => (a.label || a.resolution || '').toLowerCase().includes(p));
     if (match) {
       console.log(`[quality] Selected: ${match.label || match.resolution}`);
       return match;
@@ -180,8 +166,7 @@ async function downloadEnvatoFile(itemUrl, cookies) {
 
     const downloadDataResponses = [];
     page.on('response', async (response) => {
-      const url = response.url();
-      if (url.includes('download.data')) {
+      if (response.url().includes('download.data')) {
         try {
           const text = await response.text();
           downloadDataResponses.push(text);
@@ -193,7 +178,6 @@ async function downloadEnvatoFile(itemUrl, cookies) {
     await page.goto(itemUrl, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
 
-    // Парсим itemUuid и assets из window.__remixContext
     const pageData = await page.evaluate(() => {
       try { return JSON.stringify(window.__remixContext); } catch { return null; }
     });
@@ -222,21 +206,20 @@ async function downloadEnvatoFile(itemUrl, cookies) {
 
     console.log('[parse] itemUuid:', itemUuid, '| assets:', assets.length);
 
-    // Если уже поймали ответ от download.data
+    const findUrl = (arr) => {
+      if (!Array.isArray(arr)) return null;
+      for (let i = 0; i < arr.length; i++) {
+        if (arr[i] === 'downloadUrl' && typeof arr[i + 1] === 'string') return arr[i + 1];
+        if (Array.isArray(arr[i])) { const f = findUrl(arr[i]); if (f) return f; }
+        if (arr[i] && typeof arr[i] === 'object') { const f = findUrl(Object.values(arr[i])); if (f) return f; }
+      }
+      return null;
+    };
+
     if (downloadDataResponses.length > 0) {
-      const findUrl = (arr) => {
-        if (!Array.isArray(arr)) return null;
-        for (let i = 0; i < arr.length; i++) {
-          if (arr[i] === 'downloadUrl' && typeof arr[i + 1] === 'string') return arr[i + 1];
-          if (Array.isArray(arr[i])) { const f = findUrl(arr[i]); if (f) return f; }
-          if (arr[i] && typeof arr[i] === 'object') { const f = findUrl(Object.values(arr[i])); if (f) return f; }
-        }
-        return null;
-      };
       try { downloadUrl = findUrl(JSON.parse(downloadDataResponses[0])); } catch {}
     }
 
-    // Если нет — запрашиваем download.data вручную
     if (!downloadUrl && itemUuid) {
       let selectedAssetUuid = null;
       if (assets.length > 0) {
@@ -258,7 +241,7 @@ async function downloadEnvatoFile(itemUrl, cookies) {
           'accept': '*/*',
           'cookie': cookieStr,
           'referer': itemUrl,
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           'sec-fetch-dest': 'empty',
           'sec-fetch-mode': 'cors',
           'sec-fetch-site': 'same-origin',
@@ -267,17 +250,6 @@ async function downloadEnvatoFile(itemUrl, cookies) {
 
       const text = await resp.text();
       console.log('[download.data] Response:', text.substring(0, 200));
-
-      const findUrl = (arr) => {
-        if (!Array.isArray(arr)) return null;
-        for (let i = 0; i < arr.length; i++) {
-          if (arr[i] === 'downloadUrl' && typeof arr[i + 1] === 'string') return arr[i + 1];
-          if (Array.isArray(arr[i])) { const f = findUrl(arr[i]); if (f) return f; }
-          if (arr[i] && typeof arr[i] === 'object') { const f = findUrl(Object.values(arr[i])); if (f) return f; }
-        }
-        return null;
-      };
-
       try { downloadUrl = findUrl(JSON.parse(text)); } catch (e) {
         console.error('[download.data] Parse error:', e.message);
       }
@@ -301,7 +273,6 @@ async function downloadEnvatoFile(itemUrl, cookies) {
 
     const sizeMB = fs.statSync(filePath).size / 1024 / 1024;
     console.log(`[download] Done: ${sizeMB.toFixed(1)} MB`);
-
     return { filePath, filename, sizeMB };
 
   } finally {
@@ -311,13 +282,11 @@ async function downloadEnvatoFile(itemUrl, cookies) {
 
 async function convertToMp4IfNeeded(filePath, sizeMB) {
   if (sizeMB <= 1024) {
-    console.log('[ffmpeg] File is under 1GB, skipping conversion');
+    console.log('[ffmpeg] File is under 1GB, skipping');
     return { filePath, converted: false };
   }
-
-  console.log(`[ffmpeg] File is ${sizeMB.toFixed(0)}MB > 1GB, converting...`);
+  console.log(`[ffmpeg] ${sizeMB.toFixed(0)}MB > 1GB, converting...`);
   const outPath = filePath.replace(/\.[^.]+$/, '_compressed.mp4');
-
   await new Promise((resolve, reject) => {
     const proc = spawn('ffmpeg', [
       '-i', filePath, '-c:v', 'libx264', '-crf', '23',
@@ -325,24 +294,16 @@ async function convertToMp4IfNeeded(filePath, sizeMB) {
       '-movflags', '+faststart', '-y', outPath,
     ]);
     proc.stderr.on('data', d => process.stdout.write(d));
-    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited with code ${code}`)));
+    proc.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg exited ${code}`)));
   });
-
   const newSize = fs.statSync(outPath).size / 1024 / 1024;
-  console.log(`[ffmpeg] Done: ${newSize.toFixed(1)} MB`);
   fs.unlinkSync(filePath);
   return { filePath: outPath, converted: true, sizeMB: newSize };
 }
 
 function cleanup(filePath) {
-  try {
-    if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-  } catch (e) {
-    console.error('[cleanup] Error:', e.message);
-  }
+  try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 }
-
-// ═══════════ ROUTES ═══════════
 
 app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
 
