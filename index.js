@@ -42,6 +42,12 @@ app.post('/resolve', async (req, res) => {
 
     const finalUrl = page.url();
 
+    const html = await page.content();
+
+    const uuidFromHtml = html.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i);
+
+    const uuid = uuidFromHtml ? uuidFromHtml[0] : null;
+    
     // пробуем вытащить UUID напрямую
     const uuidMatch = finalUrl.match(/[0-9a-f-]{36}/);
 
@@ -49,7 +55,7 @@ app.post('/resolve', async (req, res) => {
       ok: true,
       originalUrl: url,
       finalUrl,
-      uuid: uuidMatch ? uuidMatch[0] : null,
+      uuid,
     });
 
   } catch (e) {
