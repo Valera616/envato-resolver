@@ -1,34 +1,20 @@
 import express from 'express';
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { spawn } from 'child_process';
 import fs, { createReadStream, existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
-
-puppeteer.use(StealthPlugin());
+import { HttpsProxyAgent } from 'https-proxy-agent';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const LOGIN_TOKEN = process.env.LOGIN_TOKEN;
+const PROXY_URL = process.env.PROXY_URL;
 const DOWNLOAD_DIR = path.join(__dirname, 'downloads');
 if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR);
 
-let browser = null;
 let savedCookies = null;
-
-async function getBrowser() {
-  if (!browser || !browser.connected) {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu'],
-    });
-    console.log('[browser] Started');
-  }
-  return browser;
-}
 
 function areCookiesValid(cookies) {
   if (!cookies || cookies.length === 0) return false;
@@ -49,138 +35,88 @@ function parseCookieString(cookieStr) {
   }).filter(c => c.name);
 }
 
-async function getDownloadUrl(envatoUrl, cookies) {
-  const b = await getBrowser();
-  const page = await b.newPage();
-
-  try {
-    // Шаг 1: Открываем домен (без куков) чтобы браузер знал домен
-    console.log('[step1] Opening domain...');
-    await page.goto('https://elements.envato.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 1000));
-
-    // Шаг 2: Устанавливаем куки на правильные домены
-    for (const cookie of cookies) {
-      for (const domain of ['elements.envato.com', 'app.envato.com', '.envato.com']) {
-        try {
-          await page.setCookie({ ...cookie, domain, path: '/' });
-        } catch(e) {}
-      }
-    }
-    console.log('[step2] Cookies set');
-
-    // Шаг 3: Перехватываем download.data
-    let downloadUrl = null;
-    page.on('response', async (response) => {
-      if (response.url().includes('download.data') && !downloadUrl) {
-        try {
-          const text = await response.text();
-          console.log('[intercept] download.data:', text.substring(0, 150));
-          const find = (arr) => {
-            if (!Array.isArray(arr)) return null;
-            for (let i = 0; i < arr.length; i++) {
-              if (arr[i] === 'downloadUrl' && typeof arr[i+1] === 'string') return arr[i+1];
-              if (Array.isArray(arr[i])) { const f = find(arr[i]); if (f) return f; }
-              if (arr[i] && typeof arr[i] === 'object') { const f = find(Object.values(arr[i])); if (f) return f; }
-            }
-            return null;
-          };
-          downloadUrl = find(JSON.parse(text));
-          if (downloadUrl) console.log('[intercept] downloadUrl found!');
-        } catch(e) { console.error('[intercept] error:', e.message); }
-      }
-    });
-
-    // Шаг 4: Теперь открываем целевую страницу — с куками уже в браузере
-    console.log('[step3] Navigating to:', envatoUrl);
-    await page.goto(envatoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 3000));
-
-    const finalUrl = page.url();
-    console.log('[step3] Final URL:', finalUrl);
-    console.log('[step3] Title:', await page.title());
-
-    // Шаг 5: Извлекаем itemUuid из URL
-    const itemUuid = finalUrl.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
-    console.log('[step3] itemUuid:', itemUuid);
-
-    if (!itemUuid) {
-      // Делаем скриншот для дебага
-      await page.screenshot({ path: '/tmp/debug-page.png', fullPage: true });
-      throw new Error('No UUID in URL: ' + finalUrl + ' | Title: ' + await page.title());
-    }
-
-    // Шаг 6: Нажимаем Download (не Download preview!)
-    const btnText = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button')];
-      // Ищем кнопку Download (зелёная, с иконкой скачивания)
-      // Избегаем "Download preview"
-      const btn = btns.find(b => {
-        const t = b.textContent.trim().toLowerCase();
-        return t.startsWith('download') && !t.includes('preview') && !t.includes('free');
-      });
-      if (btn) { btn.click(); return btn.textContent.trim(); }
-      return null;
-    });
-    console.log('[step4] Clicked:', btnText);
-    await new Promise(r => setTimeout(r, 4000));
-
-    if (downloadUrl) return { downloadUrl, appUrl: finalUrl, itemUuid };
-
-    // Шаг 7: Прямой API запрос
-    console.log('[step5] Direct API call...');
-    const itemType = finalUrl.includes('stock-video') ? 'stock-video' :
-                     finalUrl.includes('music') ? 'music' :
-                     finalUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
-
-    const apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
-    console.log('[step5] API URL:', apiUrl);
-
-    const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-    const resp = await fetch(apiUrl, {
-      headers: {
-        'accept': '*/*', 'cookie': cookieStr, 'referer': finalUrl,
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-        'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin',
-      },
-    });
-
-    const text = await resp.text();
-    console.log('[step5] status:', resp.status, '| response:', text.substring(0, 300));
-
-    const find = (arr) => {
-      if (!Array.isArray(arr)) return null;
-      for (let i = 0; i < arr.length; i++) {
-        if (arr[i] === 'downloadUrl' && typeof arr[i+1] === 'string') return arr[i+1];
-        if (Array.isArray(arr[i])) { const f = find(arr[i]); if (f) return f; }
-        if (arr[i] && typeof arr[i] === 'object') { const f = find(Object.values(arr[i])); if (f) return f; }
-      }
-      return null;
-    };
-
-    try { downloadUrl = find(JSON.parse(text)); } catch(e) {
-      throw new Error('API parse error: ' + text.substring(0, 300));
-    }
-
-    if (!downloadUrl) throw new Error('downloadUrl not found. API response: ' + text.substring(0, 300));
-
-    return { downloadUrl, appUrl: finalUrl, itemUuid };
-
-  } finally {
-    await page.close();
-  }
+function getCookieStr(cookies) {
+  return cookies.map(c => `${c.name}=${c.value}`).join('; ');
 }
 
-function cleanup(filePath) {
-  try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+function proxyFetch(url, options = {}) {
+  const agent = PROXY_URL ? new HttpsProxyAgent(PROXY_URL) : undefined;
+  return fetch(url, { ...options, agent });
+}
+
+async function getDownloadUrl(envatoUrl, cookies) {
+  const cookieStr = getCookieStr(cookies);
+  const baseHeaders = {
+    'accept': 'text/html,application/xhtml+xml,*/*;q=0.9',
+    'accept-language': 'en-US,en;q=0.9',
+    'cookie': cookieStr,
+    'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+    'cache-control': 'no-cache',
+  };
+
+  console.log('[step1] Following redirect:', envatoUrl);
+  const redirectResp = await proxyFetch(envatoUrl, { headers: baseHeaders, redirect: 'follow' });
+  const finalUrl = redirectResp.url;
+  console.log('[step1] Final URL:', finalUrl, 'Status:', redirectResp.status);
+
+  let itemUuid = finalUrl.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
+
+  if (!itemUuid) {
+    const html = await redirectResp.text();
+    itemUuid = html.match(/itemUuid["s:]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
+    console.log('[step1] UUID from HTML:', itemUuid);
+  }
+
+  if (!itemUuid) throw new Error('Could not extract itemUuid from: ' + finalUrl);
+  console.log('[step1] itemUuid:', itemUuid);
+
+  const itemType = finalUrl.includes('stock-video') ? 'stock-video' :
+                   finalUrl.includes('music') ? 'music' :
+                   finalUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
+
+  const apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
+  console.log('[step2] API:', apiUrl);
+
+  const apiResp = await proxyFetch(apiUrl, {
+    headers: {
+      'accept': '*/*',
+      'cookie': cookieStr,
+      'referer': finalUrl,
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+      'sec-fetch-dest': 'empty',
+      'sec-fetch-mode': 'cors',
+      'sec-fetch-site': 'same-origin',
+    },
+  });
+
+  const text = await apiResp.text();
+  console.log('[step2] Status:', apiResp.status, '| Response:', text.substring(0, 300));
+
+  const findUrl = (arr) => {
+    if (!Array.isArray(arr)) return null;
+    for (let i = 0; i < arr.length; i++) {
+      if (arr[i] === 'downloadUrl' && typeof arr[i+1] === 'string') return arr[i+1];
+      if (Array.isArray(arr[i])) { const f = findUrl(arr[i]); if (f) return f; }
+      if (arr[i] && typeof arr[i] === 'object') { const f = findUrl(Object.values(arr[i])); if (f) return f; }
+    }
+    return null;
+  };
+
+  let downloadUrl = null;
+  try { downloadUrl = findUrl(JSON.parse(text)); }
+  catch(e) { throw new Error('Parse error: ' + text.substring(0, 200)); }
+
+  if (!downloadUrl) throw new Error('downloadUrl not found. Response: ' + text.substring(0, 200));
+  console.log('[step2] downloadUrl found!');
+  return { downloadUrl, itemUuid, appUrl: finalUrl };
 }
 
 async function convertToMp4IfNeeded(filePath, sizeMB) {
   if (sizeMB <= 1024) return { filePath, converted: false };
   const outPath = filePath.replace(/\.[^.]+$/, '_compressed.mp4');
   await new Promise((resolve, reject) => {
-    const proc = spawn('ffmpeg', ['-i', filePath, '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
-      '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', outPath]);
+    const proc = spawn('ffmpeg', ['-i', filePath, '-c:v', 'libx264', '-crf', '23',
+      '-preset', 'fast', '-c:a', 'aac', '-b:a', '128k', '-movflags', '+faststart', '-y', outPath]);
     proc.stderr.on('data', d => process.stdout.write(d));
     proc.on('close', code => code === 0 ? resolve() : reject(new Error(`ffmpeg ${code}`)));
   });
@@ -189,13 +125,11 @@ async function convertToMp4IfNeeded(filePath, sizeMB) {
   return { filePath: outPath, converted: true, sizeMB: newSize };
 }
 
-app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
+function cleanup(filePath) {
+  try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
+}
 
-app.get('/screenshot', (req, res) => {
-  if (!existsSync('/tmp/debug-page.png')) return res.status(404).json({ error: 'No screenshot' });
-  res.setHeader('Content-Type', 'image/png');
-  createReadStream('/tmp/debug-page.png').pipe(res);
-});
+app.get('/', (req, res) => res.json({ ok: true, status: 'running', proxy: !!PROXY_URL }));
 
 app.get('/status', (req, res) => {
   const valid = areCookiesValid(savedCookies);
@@ -207,7 +141,7 @@ app.get('/status', (req, res) => {
       expiresAt = new Date(p.exp * 1000).toISOString();
     } catch {}
   }
-  res.json({ ok: true, sessionValid: valid, expiresAt, cookiesCount: savedCookies?.length || 0 });
+  res.json({ ok: true, sessionValid: valid, expiresAt, cookiesCount: savedCookies?.length || 0, proxy: !!PROXY_URL });
 });
 
 app.post('/set-cookie-string', (req, res) => {
@@ -229,7 +163,7 @@ app.get('/get-download-url', async (req, res) => {
     const result = await getDownloadUrl(url, savedCookies);
     res.json({ ok: true, ...result });
   } catch(e) {
-    console.error('[get-download-url] Error:', e.message);
+    console.error('[get-download-url]', e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
@@ -267,8 +201,7 @@ app.post('/download', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, '0.0.0.0', async () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Running on port ${PORT}`);
-  await getBrowser();
-  console.log('[server] Ready. Use /set-cookie-string to set session.');
+  console.log(`[server] Proxy: ${PROXY_URL ? 'configured ✓' : 'NOT configured ✗'}`);
 });
