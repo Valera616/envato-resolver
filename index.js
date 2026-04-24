@@ -46,7 +46,6 @@ function areCookiesValid(cookies) {
   } catch { return false; }
 }
 
-// Парсим raw cookie string в массив объектов
 function parseCookieString(cookieStr, domain = '.envato.com') {
   return cookieStr.split(';').map(pair => {
     const [name, ...rest] = pair.trim().split('=');
@@ -54,94 +53,9 @@ function parseCookieString(cookieStr, domain = '.envato.com') {
   }).filter(c => c.name);
 }
 
-async function login() {
-  console.log('[auth] Logging in via CDP insertText...');
-  const b = await getBrowser();
-  const page = await b.newPage();
-  const client = await page.createCDPSession();
-
-  try {
-    await page.goto('https://elements.envato.com/sign-in', { waitUntil: 'domcontentloaded', timeout: 60000 });
-
-    // Закрываем cookie banner
-    await new Promise(r => setTimeout(r, 2000));
-    await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button')];
-      const accept = btns.find(b => b.textContent.trim() === 'Accept Cookies');
-      if (accept) accept.click();
-    }).catch(() => {});
-    await new Promise(r => setTimeout(r, 1000));
-
-    await page.waitForSelector('input[name="username"]', { timeout: 30000 });
-    await new Promise(r => setTimeout(r, 1000));
-
-    // Кликаем на username и вводим через CDP Input.insertText
-    await page.click('input[name="username"]');
-    await new Promise(r => setTimeout(r, 500));
-    await client.send('Input.insertText', { text: ENVATO_EMAIL });
-    await new Promise(r => setTimeout(r, 500));
-
-    const usernameVal = await page.$eval('input[name="username"]', el => el.value);
-    console.log('[auth] Username after CDP insertText:', usernameVal);
-
-    // Password
-    await page.click('input[name="password"]');
-    await new Promise(r => setTimeout(r, 300));
-    // Очищаем существующее значение
-    await page.keyboard.down('Control');
-    await page.keyboard.press('KeyA');
-    await page.keyboard.up('Control');
-    await new Promise(r => setTimeout(r, 100));
-    await client.send('Input.insertText', { text: ENVATO_PASSWORD });
-    await new Promise(r => setTimeout(r, 500));
-
-    const passwordLen = await page.$eval('input[name="password"]', el => el.value.length);
-    console.log('[auth] Password length:', passwordLen);
-
-    await page.screenshot({ path: '/tmp/login-debug.png', fullPage: true });
-
-    // Сабмит
-    await Promise.all([
-      page.click('button[type="submit"]'),
-      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}),
-    ]);
-    await new Promise(r => setTimeout(r, 4000));
-
-    const finalUrl = page.url();
-    console.log('[auth] URL after submit:', finalUrl);
-    await page.screenshot({ path: '/tmp/login-after.png', fullPage: true });
-
-    if (finalUrl.includes('sign-in')) {
-      throw new Error('Still on sign-in page. Username likely not filled. Use /set-cookie-string instead.');
-    }
-
-    const pageText = await page.evaluate(() => document.body.innerText);
-    if (pageText.includes('Great to have you back')) {
-      console.log('[auth] Intermediate page, clicking Sign in...');
-      await page.evaluate(() => {
-        const btns = [...document.querySelectorAll('button, a')];
-        const signIn = btns.find(b => b.textContent.trim() === 'Sign in');
-        if (signIn) signIn.click();
-      });
-      await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await new Promise(r => setTimeout(r, 3000));
-    }
-
-    console.log('[auth] Final URL:', page.url());
-    const cookies = await page.cookies('https://elements.envato.com', 'https://app.envato.com');
-    if (!areCookiesValid(cookies)) throw new Error('envatoid cookie missing after login');
-
-    savedCookies = cookies;
-    console.log(`[auth] Login OK, ${cookies.length} cookies`);
-    return cookies;
-  } finally {
-    await page.close();
-  }
-}
-
-async function getCookies(forceRelogin = false) {
-  if (!forceRelogin && areCookiesValid(savedCookies)) return savedCookies;
-  return await login();
+async function getCookies() {
+  if (areCookiesValid(savedCookies)) return savedCookies;
+  throw new Error('No valid session. Please call /set-cookie-string first.');
 }
 
 function selectBestAsset(assets) {
@@ -162,34 +76,67 @@ async function downloadEnvatoFile(itemUrl, cookies) {
   const b = await getBrowser();
   const page = await b.newPage();
   let downloadUrl = null;
+
   try {
-    await page.setCookie(...cookies);
+    // Устанавливаем куки для всех доменов Envato
+    const domains = ['elements.envato.com', 'app.envato.com', '.envato.com'];
+    for (const domain of domains) {
+      for (const cookie of cookies) {
+        try {
+          await page.setCookie({ ...cookie, domain });
+        } catch {}
+      }
+    }
+
+    // Перехватываем download.data ответы
     const downloadDataResponses = [];
     page.on('response', async (response) => {
-      if (response.url().includes('download.data')) {
-        try { downloadDataResponses.push(await response.text()); } catch {}
+      const url = response.url();
+      if (url.includes('download.data')) {
+        try {
+          const text = await response.text();
+          downloadDataResponses.push(text);
+          console.log('[intercept] download.data caught:', text.substring(0, 100));
+        } catch {}
       }
     });
-    await page.goto(itemUrl, { waitUntil: 'networkidle2', timeout: 60000 });
+
+    // Конвертируем elements.envato.com -> app.envato.com
+    const appUrl = itemUrl.includes('elements.envato.com')
+      ? itemUrl.replace('elements.envato.com', 'app.envato.com')
+      : itemUrl;
+
+    console.log('[download] Navigating to:', appUrl);
+    await page.goto(appUrl, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
 
-    const pageData = await page.evaluate(() => { try { return JSON.stringify(window.__remixContext); } catch { return null; } });
-    let itemUuid = null, assets = [];
-    if (pageData) {
-      const find = (obj, d = 0) => {
-        if (!obj || d > 10) return;
-        if (typeof obj === 'object') {
-          if (obj.itemUuid) itemUuid = obj.itemUuid;
-          if (obj.assets && Array.isArray(obj.assets)) assets = obj.assets;
-          if (obj.videoAssets && Array.isArray(obj.videoAssets)) assets = obj.videoAssets;
-          Object.values(obj).forEach(v => find(v, d + 1));
-        }
-      };
-      find(JSON.parse(pageData));
-    }
-    if (!itemUuid) { const m = page.url().match(/([0-9a-f-]{36})/); if (m) itemUuid = m[1]; }
-    console.log('[parse] itemUuid:', itemUuid, '| assets:', assets.length);
+    console.log('[download] Page URL:', page.url());
+    console.log('[download] Page title:', await page.title());
 
+    // Ищем и нажимаем кнопку Download
+    const downloadBtn = await page.$('button[class*="download"], a[class*="download"], button[data-testid*="download"]')
+      .catch(() => null);
+
+    if (downloadBtn) {
+      console.log('[download] Found download button, clicking...');
+      await downloadBtn.click();
+      await new Promise(r => setTimeout(r, 3000));
+    } else {
+      // Пробуем найти по тексту
+      const clicked = await page.evaluate(() => {
+        const btns = [...document.querySelectorAll('button, a')];
+        const btn = btns.find(b => {
+          const text = b.textContent.trim().toLowerCase();
+          return text.includes('download') && !text.includes('free');
+        });
+        if (btn) { btn.click(); return true; }
+        return false;
+      });
+      console.log('[download] Click by text:', clicked);
+      if (clicked) await new Promise(r => setTimeout(r, 3000));
+    }
+
+    // Проверяем перехваченные ответы
     const findUrl = (arr) => {
       if (!Array.isArray(arr)) return null;
       for (let i = 0; i < arr.length; i++) {
@@ -202,42 +149,101 @@ async function downloadEnvatoFile(itemUrl, cookies) {
 
     if (downloadDataResponses.length > 0) {
       try { downloadUrl = findUrl(JSON.parse(downloadDataResponses[0])); } catch {}
+      console.log('[download] URL from intercept:', downloadUrl ? 'found' : 'not found');
     }
 
-    if (!downloadUrl && itemUuid) {
-      let selectedAssetUuid = null;
-      if (assets.length > 0) {
-        const chosen = selectBestAsset(assets);
-        selectedAssetUuid = chosen.assetUuid || chosen.uuid || chosen.id;
-      }
-      const itemType = itemUrl.includes('stock-video') ? 'stock-video' :
-                       itemUrl.includes('music') ? 'music' :
-                       itemUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
-      let apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
-      if (selectedAssetUuid) apiUrl += `&assetUuid=${selectedAssetUuid}`;
-      console.log('[download] API:', apiUrl);
-      const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
-      const resp = await fetch(apiUrl, {
-        headers: { 'accept': '*/*', 'cookie': cookieStr, 'referer': itemUrl,
-          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin' },
+    // Если клик не дал результата — пробуем прямой API вызов
+    if (!downloadUrl) {
+      console.log('[download] Trying direct API call...');
+
+      // Достаём itemUuid из страницы
+      const pageData = await page.evaluate(() => {
+        try { return JSON.stringify(window.__remixContext); } catch { return null; }
       });
-      const text = await resp.text();
-      console.log('[download.data]', text.substring(0, 200));
-      try { downloadUrl = findUrl(JSON.parse(text)); } catch (e) { console.error('[download.data] parse error:', e.message); }
+
+      let itemUuid = null;
+      let assets = [];
+
+      if (pageData) {
+        const find = (obj, d = 0) => {
+          if (!obj || d > 10) return;
+          if (typeof obj === 'object') {
+            if (obj.itemUuid) itemUuid = obj.itemUuid;
+            if (obj.assets && Array.isArray(obj.assets)) assets = obj.assets;
+            if (obj.videoAssets && Array.isArray(obj.videoAssets)) assets = obj.videoAssets;
+            Object.values(obj).forEach(v => find(v, d + 1));
+          }
+        };
+        find(JSON.parse(pageData));
+      }
+
+      // Fallback: из URL
+      if (!itemUuid) {
+        const m = page.url().match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+        if (m) itemUuid = m[1];
+      }
+
+      console.log('[download] itemUuid:', itemUuid, '| assets:', assets.length);
+
+      if (itemUuid) {
+        let selectedAssetUuid = null;
+        if (assets.length > 0) {
+          const chosen = selectBestAsset(assets);
+          selectedAssetUuid = chosen.assetUuid || chosen.uuid || chosen.id;
+          console.log('[download] Selected asset UUID:', selectedAssetUuid);
+        }
+
+        const itemType = appUrl.includes('stock-video') ? 'stock-video' :
+                         appUrl.includes('music') ? 'music' :
+                         appUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
+
+        let apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
+        if (selectedAssetUuid) apiUrl += `&assetUuid=${selectedAssetUuid}`;
+
+        console.log('[download] API URL:', apiUrl);
+
+        const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+        const resp = await fetch(apiUrl, {
+          headers: {
+            'accept': '*/*',
+            'cookie': cookieStr,
+            'referer': appUrl,
+            'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+          },
+        });
+
+        const text = await resp.text();
+        console.log('[download.data] status:', resp.status, '| response:', text.substring(0, 300));
+
+        try { downloadUrl = findUrl(JSON.parse(text)); } catch (e) {
+          console.error('[download.data] parse error:', e.message, '| raw:', text.substring(0, 200));
+        }
+      }
     }
 
     if (!downloadUrl) throw new Error('Could not obtain download URL');
+
+    console.log('[download] Got URL:', downloadUrl.substring(0, 80) + '...');
+
     const urlObj = new URL(downloadUrl);
     const filename = decodeURIComponent(urlObj.pathname.split('/').pop() || `envato-${Date.now()}.mov`);
     const filePath = path.join(DOWNLOAD_DIR, filename);
+
+    console.log('[download] Downloading file to:', filePath);
     const fileResp = await fetch(downloadUrl);
-    if (!fileResp.ok) throw new Error(`Download failed: ${fileResp.status}`);
+    if (!fileResp.ok) throw new Error(`File download failed: ${fileResp.status}`);
     fs.writeFileSync(filePath, Buffer.from(await fileResp.arrayBuffer()));
+
     const sizeMB = fs.statSync(filePath).size / 1024 / 1024;
     console.log(`[download] Done: ${sizeMB.toFixed(1)} MB`);
     return { filePath, filename, sizeMB };
-  } finally { await page.close(); }
+
+  } finally {
+    await page.close();
+  }
 }
 
 async function convertToMp4IfNeeded(filePath, sizeMB) {
@@ -258,26 +264,12 @@ function cleanup(filePath) {
   try { if (fs.existsSync(filePath)) fs.unlinkSync(filePath); } catch {}
 }
 
-// ═══════════ ROUTES ═══════════
-
 app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
 
 app.get('/screenshot', (req, res) => {
   if (!existsSync('/tmp/login-debug.png')) return res.status(404).json({ error: 'No screenshot' });
   res.setHeader('Content-Type', 'image/png');
   createReadStream('/tmp/login-debug.png').pipe(res);
-});
-
-app.get('/screenshot2', (req, res) => {
-  if (!existsSync('/tmp/login-after.png')) return res.status(404).json({ error: 'No screenshot' });
-  res.setHeader('Content-Type', 'image/png');
-  createReadStream('/tmp/login-after.png').pipe(res);
-});
-
-app.get('/login', async (req, res) => {
-  if (req.query.token !== LOGIN_TOKEN) return res.status(403).json({ ok: false, error: 'Forbidden' });
-  try { res.json({ ok: true, cookiesCount: (await login()).length }); }
-  catch (e) { res.status(500).json({ ok: false, error: e.message }); }
 });
 
 app.get('/status', (req, res) => {
@@ -293,51 +285,43 @@ app.get('/status', (req, res) => {
   res.json({ ok: true, sessionValid: valid, expiresAt, cookiesCount: savedCookies?.length || 0 });
 });
 
-// ─────────────────────────────────────────
-// ПРИНЯТЬ КУКИ КАК RAW СТРОКУ (из браузера)
-// POST /set-cookie-string?token=xxx
-// Body: { "cookieString": "_ga=...; envatoid=eyJ..." }
-// ─────────────────────────────────────────
 app.post('/set-cookie-string', async (req, res) => {
   if (req.query.token !== LOGIN_TOKEN) return res.status(403).json({ ok: false, error: 'Forbidden' });
   const { cookieString } = req.body;
   if (!cookieString) return res.status(400).json({ ok: false, error: 'cookieString required' });
-
-  const cookies = parseCookieString(cookieString);
-  savedCookies = cookies;
-  const valid = areCookiesValid(cookies);
-  console.log(`[set-cookie-string] ${cookies.length} cookies set, valid: ${valid}`);
-  res.json({ ok: true, sessionValid: valid, cookiesCount: cookies.length });
+  savedCookies = parseCookieString(cookieString);
+  const valid = areCookiesValid(savedCookies);
+  console.log(`[set-cookie-string] ${savedCookies.length} cookies, valid: ${valid}`);
+  res.json({ ok: true, sessionValid: valid, cookiesCount: savedCookies.length });
 });
 
 app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ ok: false, error: 'url is required' });
-  let itemUrl = url.includes('elements.envato.com') ? url.replace('elements.envato.com', 'app.envato.com') : url;
+
+  console.log('[/download] Request:', url);
   let filePath = null;
+
   try {
-    let cookies = await getCookies();
-    let result;
-    try { result = await downloadEnvatoFile(itemUrl, cookies); }
-    catch (e) {
-      if (e.message.includes('401') || e.message.includes('403') || e.message.includes('sign-in')) {
-        cookies = await getCookies(true);
-        result = await downloadEnvatoFile(itemUrl, cookies);
-      } else throw e;
-    }
+    const cookies = await getCookies();
+    const result = await downloadEnvatoFile(url, cookies);
+
     filePath = result.filePath;
     const converted = await convertToMp4IfNeeded(result.filePath, result.sizeMB);
     filePath = converted.filePath;
+
     const finalSize = fs.statSync(filePath).size;
     res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Length', finalSize);
     res.setHeader('X-Converted', converted.converted ? 'true' : 'false');
     res.setHeader('X-File-Size-MB', (finalSize / 1024 / 1024).toFixed(1));
+
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     stream.on('end', () => cleanup(filePath));
     stream.on('error', () => cleanup(filePath));
+
   } catch (e) {
     console.error('[/download] Error:', e.message);
     if (filePath) cleanup(filePath);
@@ -349,6 +333,5 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', async () => {
   console.log(`[server] Running on port ${PORT}`);
   await getBrowser();
-  try { await getCookies(); console.log('[server] Auto-login OK'); }
-  catch (e) { console.error('[server] Auto-login failed:', e.message); }
+  console.log('[server] Ready. Use /set-cookie-string to set session.');
 });
