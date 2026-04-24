@@ -54,25 +54,51 @@ async function getDownloadUrl(envatoUrl, cookies) {
     'cache-control': 'no-cache',
   };
 
-  console.log('[step1] Following redirect:', envatoUrl);
-  const redirectResp = await proxyFetch(envatoUrl, { headers: baseHeaders, redirect: 'follow' });
-  const finalUrl = redirectResp.url;
-  console.log('[step1] Final URL:', finalUrl, 'Status:', redirectResp.status);
+  let itemUuid = null;
+  let appUrl = envatoUrl;
 
-  let itemUuid = finalUrl.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
+  // Если уже app.envato.com с UUID — берём напрямую
+  const directUuid = envatoUrl.match(/app\.envato\.com\/[^/]+\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+  if (directUuid) {
+    itemUuid = directUuid[1];
+    appUrl = envatoUrl;
+    console.log('[step1] UUID from URL directly:', itemUuid);
+  } else {
+    console.log('[step1] Loading page:', envatoUrl);
+    const resp = await proxyFetch(envatoUrl, { headers: baseHeaders, redirect: 'follow' });
+    appUrl = resp.url;
+    console.log('[step1] Final URL:', appUrl, 'Status:', resp.status);
 
-  if (!itemUuid) {
-    const html = await redirectResp.text();
-    itemUuid = html.match(/itemUuid["s:]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
-    console.log('[step1] UUID from HTML:', itemUuid);
+    const urlUuid = appUrl.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/);
+    if (urlUuid) {
+      itemUuid = urlUuid[1];
+      console.log('[step1] UUID from URL:', itemUuid);
+    } else {
+      const html = await resp.text();
+      const patterns = [
+        /\"itemUuid\":\"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\"/,
+        /"itemUuid":"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/,
+        /itemUuid[^"]*"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"/,
+        /item_id=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/,
+        /\/stock-video\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/,
+      ];
+      for (const pattern of patterns) {
+        const m = html.match(pattern);
+        if (m) { itemUuid = m[1]; break; }
+      }
+      if (itemUuid) {
+        console.log('[step1] UUID from HTML:', itemUuid);
+        appUrl = `https://app.envato.com/stock-video/${itemUuid}`;
+      } else {
+        console.log('[step1] HTML snippet:', html.substring(0, 500));
+        throw new Error('Could not extract itemUuid from: ' + appUrl);
+      }
+    }
   }
 
-  if (!itemUuid) throw new Error('Could not extract itemUuid from: ' + finalUrl);
-  console.log('[step1] itemUuid:', itemUuid);
-
-  const itemType = finalUrl.includes('stock-video') ? 'stock-video' :
-                   finalUrl.includes('music') ? 'music' :
-                   finalUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
+  const itemType = appUrl.includes('stock-video') ? 'stock-video' :
+                   appUrl.includes('music') ? 'music' :
+                   appUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
 
   const apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
   console.log('[step2] API:', apiUrl);
@@ -81,7 +107,7 @@ async function getDownloadUrl(envatoUrl, cookies) {
     headers: {
       'accept': '*/*',
       'cookie': cookieStr,
-      'referer': finalUrl,
+      'referer': appUrl,
       'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
       'sec-fetch-dest': 'empty',
       'sec-fetch-mode': 'cors',
@@ -108,7 +134,7 @@ async function getDownloadUrl(envatoUrl, cookies) {
 
   if (!downloadUrl) throw new Error('downloadUrl not found. Response: ' + text.substring(0, 200));
   console.log('[step2] downloadUrl found!');
-  return { downloadUrl, itemUuid, appUrl: finalUrl };
+  return { downloadUrl, itemUuid, appUrl };
 }
 
 async function convertToMp4IfNeeded(filePath, sizeMB) {
@@ -203,5 +229,5 @@ app.post('/download', async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Running on port ${PORT}`);
-  console.log(`[server] Proxy: ${PROXY_URL ? 'configured ✓' : 'NOT configured ✗'}`);
+  console.log(`[server] Proxy: ${PROXY_URL ? 'configured' : 'NOT configured'}`);
 });
