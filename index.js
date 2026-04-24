@@ -49,27 +49,33 @@ function parseCookieString(cookieStr) {
   }).filter(c => c.name);
 }
 
-// Главная функция — получить downloadUrl через Puppeteer
 async function getDownloadUrl(envatoUrl, cookies) {
   const b = await getBrowser();
   const page = await b.newPage();
 
   try {
-    // Устанавливаем куки
+    // Шаг 1: Открываем домен (без куков) чтобы браузер знал домен
+    console.log('[step1] Opening domain...');
+    await page.goto('https://elements.envato.com', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 1000));
+
+    // Шаг 2: Устанавливаем куки на правильные домены
     for (const cookie of cookies) {
-      for (const domain of ['.envato.com', 'elements.envato.com', 'app.envato.com']) {
-        try { await page.setCookie({ ...cookie, domain }); } catch {}
+      for (const domain of ['elements.envato.com', 'app.envato.com', '.envato.com']) {
+        try {
+          await page.setCookie({ ...cookie, domain, path: '/' });
+        } catch(e) {}
       }
     }
+    console.log('[step2] Cookies set');
 
-    // Перехватываем download.data ответы
+    // Шаг 3: Перехватываем download.data
     let downloadUrl = null;
     page.on('response', async (response) => {
       if (response.url().includes('download.data') && !downloadUrl) {
         try {
           const text = await response.text();
-          console.log('[intercept] download.data:', text.substring(0, 200));
-          const parsed = JSON.parse(text);
+          console.log('[intercept] download.data:', text.substring(0, 150));
           const find = (arr) => {
             if (!Array.isArray(arr)) return null;
             for (let i = 0; i < arr.length; i++) {
@@ -79,72 +85,68 @@ async function getDownloadUrl(envatoUrl, cookies) {
             }
             return null;
           };
-          downloadUrl = find(parsed);
-        } catch(e) { console.error('[intercept] parse error:', e.message); }
+          downloadUrl = find(JSON.parse(text));
+          if (downloadUrl) console.log('[intercept] downloadUrl found!');
+        } catch(e) { console.error('[intercept] error:', e.message); }
       }
     });
 
-    // Шаг 1: Открываем elements.envato.com — он редиректит на app.envato.com
-    console.log('[step1] Navigating to:', envatoUrl);
+    // Шаг 4: Теперь открываем целевую страницу — с куками уже в браузере
+    console.log('[step3] Navigating to:', envatoUrl);
     await page.goto(envatoUrl, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 2000));
+    await new Promise(r => setTimeout(r, 3000));
 
-    const appUrl = page.url();
-    console.log('[step1] Redirected to:', appUrl);
+    const finalUrl = page.url();
+    console.log('[step3] Final URL:', finalUrl);
+    console.log('[step3] Title:', await page.title());
 
-    // Шаг 2: Нажимаем кнопку Download чтобы вызвать download.data
-    const clicked = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button, a')];
-      // Ищем зелёную кнопку Download
-      const btn = btns.find(b => {
-        const text = b.textContent.trim().toLowerCase();
-        return (text.startsWith('download') || text === 'download 1080p' || text === 'download 4k' || text === 'download 2k');
-      });
-      if (btn) {
-        console.log('Clicking:', btn.textContent.trim());
-        btn.click();
-        return btn.textContent.trim();
-      }
-      return null;
-    });
-
-    console.log('[step2] Clicked button:', clicked);
-    await new Promise(r => setTimeout(r, 4000));
-
-    if (downloadUrl) {
-      console.log('[result] downloadUrl found via intercept');
-      return { downloadUrl, appUrl };
-    }
-
-    // Шаг 3: Если перехват не сработал — пробуем прямой API запрос
-    console.log('[step3] Trying direct API...');
-    const itemUuid = appUrl.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
+    // Шаг 5: Извлекаем itemUuid из URL
+    const itemUuid = finalUrl.match(/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/)?.[1];
     console.log('[step3] itemUuid:', itemUuid);
 
-    if (!itemUuid) throw new Error('Could not extract itemUuid from URL: ' + appUrl);
+    if (!itemUuid) {
+      // Делаем скриншот для дебага
+      await page.screenshot({ path: '/tmp/debug-page.png', fullPage: true });
+      throw new Error('No UUID in URL: ' + finalUrl + ' | Title: ' + await page.title());
+    }
 
-    const itemType = appUrl.includes('stock-video') ? 'stock-video' :
-                     appUrl.includes('music') ? 'music' :
-                     appUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
+    // Шаг 6: Нажимаем Download (не Download preview!)
+    const btnText = await page.evaluate(() => {
+      const btns = [...document.querySelectorAll('button')];
+      // Ищем кнопку Download (зелёная, с иконкой скачивания)
+      // Избегаем "Download preview"
+      const btn = btns.find(b => {
+        const t = b.textContent.trim().toLowerCase();
+        return t.startsWith('download') && !t.includes('preview') && !t.includes('free');
+      });
+      if (btn) { btn.click(); return btn.textContent.trim(); }
+      return null;
+    });
+    console.log('[step4] Clicked:', btnText);
+    await new Promise(r => setTimeout(r, 4000));
+
+    if (downloadUrl) return { downloadUrl, appUrl: finalUrl, itemUuid };
+
+    // Шаг 7: Прямой API запрос
+    console.log('[step5] Direct API call...');
+    const itemType = finalUrl.includes('stock-video') ? 'stock-video' :
+                     finalUrl.includes('music') ? 'music' :
+                     finalUrl.includes('sound-effects') ? 'sound-effects' : 'stock-video';
 
     const apiUrl = `https://app.envato.com/download.data?itemUuid=${itemUuid}&itemType=${itemType}&_routes=routes%2Fdownload%2Froute`;
-    console.log('[step3] API URL:', apiUrl);
+    console.log('[step5] API URL:', apiUrl);
 
     const cookieStr = cookies.map(c => `${c.name}=${c.value}`).join('; ');
     const resp = await fetch(apiUrl, {
       headers: {
-        'accept': '*/*',
-        'cookie': cookieStr,
-        'referer': appUrl,
+        'accept': '*/*', 'cookie': cookieStr, 'referer': finalUrl,
         'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
+        'sec-fetch-dest': 'empty', 'sec-fetch-mode': 'cors', 'sec-fetch-site': 'same-origin',
       },
     });
 
     const text = await resp.text();
-    console.log('[step3] API status:', resp.status, '| response:', text.substring(0, 300));
+    console.log('[step5] status:', resp.status, '| response:', text.substring(0, 300));
 
     const find = (arr) => {
       if (!Array.isArray(arr)) return null;
@@ -156,15 +158,13 @@ async function getDownloadUrl(envatoUrl, cookies) {
       return null;
     };
 
-    try {
-      downloadUrl = find(JSON.parse(text));
-    } catch(e) {
-      throw new Error('API parse error: ' + e.message + ' | raw: ' + text.substring(0, 200));
+    try { downloadUrl = find(JSON.parse(text)); } catch(e) {
+      throw new Error('API parse error: ' + text.substring(0, 300));
     }
 
-    if (!downloadUrl) throw new Error('downloadUrl not found in API response: ' + text.substring(0, 200));
+    if (!downloadUrl) throw new Error('downloadUrl not found. API response: ' + text.substring(0, 300));
 
-    return { downloadUrl, appUrl };
+    return { downloadUrl, appUrl: finalUrl, itemUuid };
 
   } finally {
     await page.close();
@@ -189,9 +189,13 @@ async function convertToMp4IfNeeded(filePath, sizeMB) {
   return { filePath: outPath, converted: true, sizeMB: newSize };
 }
 
-// ═══════════ ROUTES ═══════════
-
 app.get('/', (req, res) => res.json({ ok: true, status: 'running' }));
+
+app.get('/screenshot', (req, res) => {
+  if (!existsSync('/tmp/debug-page.png')) return res.status(404).json({ error: 'No screenshot' });
+  res.setHeader('Content-Type', 'image/png');
+  createReadStream('/tmp/debug-page.png').pipe(res);
+});
 
 app.get('/status', (req, res) => {
   const valid = areCookiesValid(savedCookies);
@@ -216,13 +220,11 @@ app.post('/set-cookie-string', (req, res) => {
   res.json({ ok: true, sessionValid: valid, cookiesCount: savedCookies.length });
 });
 
-// Только получить downloadUrl (без скачивания) — для отладки
 app.get('/get-download-url', async (req, res) => {
   if (req.query.token !== LOGIN_TOKEN) return res.status(403).json({ ok: false, error: 'Forbidden' });
   const { url } = req.query;
   if (!url) return res.status(400).json({ ok: false, error: 'url required' });
-  if (!areCookiesValid(savedCookies)) return res.status(401).json({ ok: false, error: 'No valid session. Call /set-cookie-string first.' });
-
+  if (!areCookiesValid(savedCookies)) return res.status(401).json({ ok: false, error: 'No valid session' });
   try {
     const result = await getDownloadUrl(url, savedCookies);
     res.json({ ok: true, ...result });
@@ -232,44 +234,31 @@ app.get('/get-download-url', async (req, res) => {
   }
 });
 
-// Скачать файл
 app.post('/download', async (req, res) => {
   const { url } = req.body;
   if (!url) return res.status(400).json({ ok: false, error: 'url is required' });
-  if (!areCookiesValid(savedCookies)) return res.status(401).json({ ok: false, error: 'No valid session. Call /set-cookie-string first.' });
-
-  console.log('[/download]', url);
+  if (!areCookiesValid(savedCookies)) return res.status(401).json({ ok: false, error: 'No valid session' });
   let filePath = null;
-
   try {
     const { downloadUrl } = await getDownloadUrl(url, savedCookies);
-
     const urlObj = new URL(downloadUrl);
     const filename = decodeURIComponent(urlObj.pathname.split('/').pop() || `envato-${Date.now()}.mov`);
     filePath = path.join(DOWNLOAD_DIR, filename);
-
-    console.log('[/download] Downloading:', filename);
     const fileResp = await fetch(downloadUrl);
     if (!fileResp.ok) throw new Error(`Download failed: ${fileResp.status}`);
     fs.writeFileSync(filePath, Buffer.from(await fileResp.arrayBuffer()));
-
     const sizeMB = fs.statSync(filePath).size / 1024 / 1024;
-    console.log(`[/download] Done: ${sizeMB.toFixed(1)} MB`);
-
     const converted = await convertToMp4IfNeeded(filePath, sizeMB);
     filePath = converted.filePath;
-
     const finalSize = fs.statSync(filePath).size;
     res.setHeader('Content-Disposition', `attachment; filename="${path.basename(filePath)}"`);
     res.setHeader('Content-Type', 'video/mp4');
     res.setHeader('Content-Length', finalSize);
     res.setHeader('X-File-Size-MB', (finalSize / 1024 / 1024).toFixed(1));
-
     const stream = fs.createReadStream(filePath);
     stream.pipe(res);
     stream.on('end', () => cleanup(filePath));
     stream.on('error', () => cleanup(filePath));
-
   } catch(e) {
     console.error('[/download] Error:', e.message);
     if (filePath) cleanup(filePath);
