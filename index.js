@@ -65,11 +65,24 @@ app.get('/', (req, res) => {
 app.get('/extract-cookies', async (req, res) => {
   const page = await browser.newPage();
   try {
+    // Visit both domains to collect all cookies
+    await page.goto('https://elements.envato.com', { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
+    const elementsCookies = await page.cookies();
+
     await page.goto('https://app.envato.com', { waitUntil: 'networkidle2', timeout: 30000 });
-    const cookies = await page.cookies();
-    const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    await new Promise(r => setTimeout(r, 2000));
+    const appCookies = await page.cookies();
+
+    // Merge, deduplicate by name (app cookies take precedence)
+    const merged = new Map();
+    for (const c of [...elementsCookies, ...appCookies]) {
+      merged.set(c.name, c.value);
+    }
+
+    const cookieString = Array.from(merged.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
     saveCookies(cookieString);
-    res.json({ ok: true, cookie: cookieString });
+    res.json({ ok: true, cookie: cookieString, count: merged.size });
   } catch (error) {
     res.status(500).json({ ok: false, error: error.message });
   } finally {
