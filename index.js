@@ -285,6 +285,41 @@ app.post('/resolve', async (req, res) => {
       itemUuid = extractUuid(finalUrl) || extractUuid(html);
     }
 
+    // If itemType still unknown, try HTTP redirect via app.envato.com
+    if (!itemType && itemUuid && storedCookies) {
+      try {
+        const candidates = [
+          `https://app.envato.com/elements/${itemUuid}`,
+          `https://app.envato.com/stock-video/${itemUuid}`,
+        ];
+        for (const candidate of candidates) {
+          const r = await fetch(candidate, {
+            redirect: 'manual',
+            headers: {
+              'Cookie': storedCookies,
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36',
+              'Accept': 'text/html,application/xhtml+xml',
+            }
+          });
+          const location = r.headers.get('location') || '';
+          const m = location.match(/app\.envato\.com\/([^/?\s]+)\/([a-f0-9-]+)/i);
+          if (m) { itemType = m[1]; itemUuid = m[2]; break; }
+          // Also check response URL after following
+          const r2 = await fetch(candidate, {
+            headers: {
+              'Cookie': storedCookies,
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+              'Accept': '*/*',
+            }
+          });
+          const m2 = r2.url.match(/app\.envato\.com\/([^/?\s]+)\/([a-f0-9-]+)/i);
+          if (m2) { itemType = m2[1]; itemUuid = m2[2]; break; }
+        }
+      } catch (e) {
+        console.warn('[resolve] HTTP fallback error:', e.message);
+      }
+    }
+
     res.json({
       ok: true,
       originalUrl: url,
