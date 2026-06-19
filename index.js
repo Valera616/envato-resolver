@@ -77,6 +77,31 @@ app.get('/extract-cookies', async (req, res) => {
   }
 });
 
+// Debug: return raw __NEXT_DATA__ from a page (temporary)
+app.post('/debug-page', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ ok: false, error: 'url required' });
+  const page = await browser.newPage();
+  try {
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36');
+    if (storedCookies) {
+      const c = parseCookiesForPuppeteer(storedCookies, '.envato.com');
+      await page.setCookie(...c);
+    }
+    await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
+    await new Promise(r => setTimeout(r, 3000));
+    const nextData = await page.evaluate(() => {
+      const el = document.getElementById('__NEXT_DATA__');
+      return el ? el.textContent : null;
+    });
+    res.json({ ok: true, finalUrl: page.url(), nextDataSample: nextData ? nextData.slice(0, 3000) : null });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  } finally {
+    await page.close().catch(() => {});
+  }
+});
+
 // GET cookies
 app.get('/cookies', (req, res) => {
   if (!storedCookies) {
