@@ -90,12 +90,49 @@ app.post('/debug-page', async (req, res) => {
     }
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
-    const html = await page.content();
-    // Look for uuid and surrounding context
-    const uuid = html.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
-    const uuidIdx = uuid ? html.indexOf(uuid) : -1;
-    const context = uuidIdx > -1 ? html.slice(Math.max(0, uuidIdx - 200), uuidIdx + 200) : null;
-    res.json({ ok: true, finalUrl: page.url(), uuid, context, htmlSample: html.slice(0, 2000) });
+    // Intercept network requests
+    const captured = [];
+    page.on('request', req => {
+      const u = req.url();
+      if (u.includes('download') || u.includes('license') || u.includes('api')) {
+        captured.push({ method: req.method(), url: u, postData: req.postData() });
+      }
+    });
+    page.on('response', async resp => {
+      const u = resp.url();
+      if (u.includes('download') || u.includes('license')) {
+        try {
+          const body = await resp.text();
+          captured.push({ type: 'response', url: u, body: body.slice(0, 500) });
+        } catch {}
+      }
+    });
+
+    // Try to click download button
+    const downloadSelectors = [
+      '[data-testid*="download"]',
+      'button[class*="download" i]',
+      'button[class*="Download"]',
+      'a[class*="download" i]',
+      'button:has-text("Download")',
+      'button:has-text("License")',
+    ];
+    for (const sel of downloadSelectors) {
+      try {
+        const el = await page.$(sel);
+        if (el) {
+          await el.click();
+          await new Promise(r => setTimeout(r, 3000));
+          break;
+        }
+      } catch {}
+    }
+
+    const allLinks = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('a')).map(a => a.href).filter(h => h.includes('envato'))
+    );
+
+    res.json({ ok: true, finalUrl: page.url(), captured, allEnvatoLinks: allLinks.slice(0, 20) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   } finally {
