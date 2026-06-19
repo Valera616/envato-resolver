@@ -135,12 +135,56 @@ app.post('/resolve', async (req, res) => {
 
     const finalUrl = page.url();
     const html = await page.content();
-    const uuid = extractUuid(finalUrl) || extractUuid(html);
 
-    // Extract itemType from finalUrl: https://app.envato.com/{itemType}/{uuid}
-    const match = finalUrl.match(/app\.envato\.com\/([^/]+)\/([a-f0-9-]+)/i);
-    const itemType = match ? match[1] : null;
-    const itemUuid = match ? match[2] : uuid;
+    let itemUuid = null;
+    let itemType = null;
+
+    // Case 1: redirected to app.envato.com/{itemType}/{uuid}
+    const appMatch = finalUrl.match(/app\.envato\.com\/([^/]+)\/([a-f0-9-]+)/i);
+    if (appMatch) {
+      itemType = appMatch[1];
+      itemUuid = appMatch[2];
+    }
+
+    // Case 2: stayed on elements.envato.com — extract from __NEXT_DATA__
+    if (!itemType) {
+      try {
+        const nextData = await page.evaluate(() => {
+          const el = document.getElementById('__NEXT_DATA__');
+          return el ? JSON.parse(el.textContent) : null;
+        });
+
+        if (nextData) {
+          // Walk the object looking for uuid and type/classification
+          const str = JSON.stringify(nextData);
+
+          const uuidMatch = str.match(/"uuid"\s*:\s*"([0-9a-f-]{36})"/i);
+          if (uuidMatch) itemUuid = uuidMatch[1];
+
+          // itemType patterns in Envato Elements __NEXT_DATA__
+          const typePatterns = [
+            /"item_type"\s*:\s*"([^"]+)"/i,
+            /"type"\s*:\s*"([^"]+)"/i,
+            /"classification"\s*:\s*"([^"]+)"/i,
+            /"category"\s*:\s*"([^"]+)"/i,
+          ];
+          for (const pat of typePatterns) {
+            const m = str.match(pat);
+            if (m && m[1] !== 'object' && m[1] !== 'array') {
+              itemType = m[1];
+              break;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[resolve] __NEXT_DATA__ parse error:', e.message);
+      }
+    }
+
+    // Fallback uuid from HTML
+    if (!itemUuid) {
+      itemUuid = extractUuid(finalUrl) || extractUuid(html);
+    }
 
     res.json({
       ok: true,
