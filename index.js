@@ -172,38 +172,61 @@ app.post('/resolve', async (req, res) => {
       itemUuid = appMatch[2];
     }
 
-    // Case 2: stayed on elements.envato.com — extract from __NEXT_DATA__
-    if (!itemType) {
+    // Case 2: stayed on elements.envato.com — try clicking Download button
+    if (!itemType && finalUrl.includes('elements.envato.com')) {
       try {
-        const nextData = await page.evaluate(() => {
-          const el = document.getElementById('__NEXT_DATA__');
-          return el ? JSON.parse(el.textContent) : null;
-        });
+        // Try to find and click download/license button
+        const downloadSelectors = [
+          'a[href*="app.envato.com"]',
+          'button[data-testid*="download"]',
+          'a[data-testid*="download"]',
+          '[class*="download"] a',
+          '[class*="Download"] a',
+          'a[href*="/download"]',
+        ];
 
-        if (nextData) {
-          // Walk the object looking for uuid and type/classification
-          const str = JSON.stringify(nextData);
-
-          const uuidMatch = str.match(/"uuid"\s*:\s*"([0-9a-f-]{36})"/i);
-          if (uuidMatch) itemUuid = uuidMatch[1];
-
-          // itemType patterns in Envato Elements __NEXT_DATA__
-          const typePatterns = [
-            /"item_type"\s*:\s*"([^"]+)"/i,
-            /"type"\s*:\s*"([^"]+)"/i,
-            /"classification"\s*:\s*"([^"]+)"/i,
-            /"category"\s*:\s*"([^"]+)"/i,
-          ];
-          for (const pat of typePatterns) {
-            const m = str.match(pat);
-            if (m && m[1] !== 'object' && m[1] !== 'array') {
-              itemType = m[1];
-              break;
+        let clicked = false;
+        for (const selector of downloadSelectors) {
+          try {
+            const el = await page.$(selector);
+            if (el) {
+              const href = await page.evaluate(el => el.href || '', el);
+              if (href && href.includes('app.envato.com')) {
+                // Extract directly from href
+                const hrefMatch = href.match(/app\.envato\.com\/([^/]+)\/([a-f0-9-]+)/i);
+                if (hrefMatch) {
+                  itemType = hrefMatch[1];
+                  itemUuid = hrefMatch[2];
+                  clicked = true;
+                  break;
+                }
+              }
+              await el.click();
+              await new Promise(r => setTimeout(r, 3000));
+              const newUrl = page.url();
+              const newMatch = newUrl.match(/app\.envato\.com\/([^/]+)\/([a-f0-9-]+)/i);
+              if (newMatch) {
+                itemType = newMatch[1];
+                itemUuid = newMatch[2];
+                clicked = true;
+                break;
+              }
             }
+          } catch {}
+        }
+
+        // Fallback: look for app.envato.com links in HTML
+        if (!clicked) {
+          const links = await page.evaluate(() =>
+            Array.from(document.querySelectorAll('a[href*="app.envato.com"]')).map(a => a.href)
+          );
+          for (const link of links) {
+            const m = link.match(/app\.envato\.com\/([^/]+)\/([a-f0-9-]+)/i);
+            if (m) { itemType = m[1]; itemUuid = m[2]; break; }
           }
         }
       } catch (e) {
-        console.warn('[resolve] __NEXT_DATA__ parse error:', e.message);
+        console.warn('[resolve] click attempt error:', e.message);
       }
     }
 
