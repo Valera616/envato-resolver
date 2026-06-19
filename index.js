@@ -36,9 +36,10 @@ function saveCookies(cookieString) {
 }
 
 async function initBrowser() {
+  const userDataDir = process.env.USER_DATA_DIR || './user-data';
   browser = await puppeteer.launch({
     headless: true,
-    userDataDir: './user-data',
+    userDataDir,
     defaultViewport: null,
     args: [
       '--no-sandbox',
@@ -60,6 +61,22 @@ app.get('/', (req, res) => {
   res.json({ ok: true, status: 'running' });
 });
 
+// Extract cookies from active Puppeteer session (use locally with user-data)
+app.get('/extract-cookies', async (req, res) => {
+  const page = await browser.newPage();
+  try {
+    await page.goto('https://app.envato.com', { waitUntil: 'networkidle2', timeout: 30000 });
+    const cookies = await page.cookies();
+    const cookieString = cookies.map(c => `${c.name}=${c.value}`).join('; ');
+    saveCookies(cookieString);
+    res.json({ ok: true, cookie: cookieString });
+  } catch (error) {
+    res.status(500).json({ ok: false, error: error.message });
+  } finally {
+    await page.close().catch(() => {});
+  }
+});
+
 // GET cookies
 app.get('/cookies', (req, res) => {
   if (!storedCookies) {
@@ -78,6 +95,18 @@ app.post('/cookies', (req, res) => {
   res.json({ ok: true, message: 'Cookies saved' });
 });
 
+// Parse cookie string into Puppeteer cookie objects
+function parseCookiesForPuppeteer(cookieString, domain) {
+  return cookieString.split(';').map(c => {
+    const eqIdx = c.indexOf('=');
+    if (eqIdx === -1) return null;
+    const name = c.slice(0, eqIdx).trim();
+    const value = c.slice(eqIdx + 1).trim();
+    if (!name) return null;
+    return { name, value, domain, path: '/' };
+  }).filter(Boolean);
+}
+
 // Resolve Envato URL → finalUrl + uuid + itemType
 app.post('/resolve', async (req, res) => {
   const { url } = req.body;
@@ -92,6 +121,14 @@ app.post('/resolve', async (req, res) => {
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36'
     );
+
+    // Inject stored cookies into browser session
+    if (storedCookies) {
+      const envatoCookies = parseCookiesForPuppeteer(storedCookies, '.envato.com');
+      const appCookies = parseCookiesForPuppeteer(storedCookies, 'app.envato.com');
+      const elementsCookies = parseCookiesForPuppeteer(storedCookies, 'elements.envato.com');
+      await page.setCookie(...envatoCookies, ...appCookies, ...elementsCookies);
+    }
 
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
