@@ -207,7 +207,14 @@ app.post('/resolve', async (req, res) => {
     }
 
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
-    await new Promise(r => setTimeout(r, 3000));
+
+    // Wait for possible JS redirect to app.envato.com (up to 15s)
+    await page.waitForFunction(
+      () => window.location.href.includes('app.envato.com'),
+      { timeout: 15000 }
+    ).catch(() => null); // ignore timeout if no redirect
+
+    await new Promise(r => setTimeout(r, 1000));
 
     const finalUrl = page.url();
     const html = await page.content();
