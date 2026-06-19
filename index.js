@@ -90,11 +90,12 @@ app.post('/debug-page', async (req, res) => {
     }
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 60000 });
     await new Promise(r => setTimeout(r, 3000));
-    const nextData = await page.evaluate(() => {
-      const el = document.getElementById('__NEXT_DATA__');
-      return el ? el.textContent : null;
-    });
-    res.json({ ok: true, finalUrl: page.url(), nextDataSample: nextData ? nextData.slice(0, 3000) : null });
+    const html = await page.content();
+    // Look for uuid and surrounding context
+    const uuid = html.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i)?.[0];
+    const uuidIdx = uuid ? html.indexOf(uuid) : -1;
+    const context = uuidIdx > -1 ? html.slice(Math.max(0, uuidIdx - 200), uuidIdx + 200) : null;
+    res.json({ ok: true, finalUrl: page.url(), uuid, context, htmlSample: html.slice(0, 2000) });
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message });
   } finally {
